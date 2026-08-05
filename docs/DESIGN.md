@@ -13,11 +13,11 @@ understand *why it does it that way* before changing something.
 
 ### Why this file exists
 
-The skill orchestrates two AI systems (Claude as the lead, OpenAI Codex
+The skill orchestrates two AI systems (OpenAI Codex as the lead/master, Google Gemini
 as the external reviewer) through a CLI subprocess interface. The
 observable behavior of the skill depends on details of the Codex CLI
 (stream splitting, exit codes, flag support), on details of the
-Claude Code harness (Bash-tool output size, Opus interpretation of
+Codex harness (Bash-tool output size, Opus interpretation of
 instructions), and on a set of trade-offs between token cost,
 robustness, and operator ergonomics. Those details drift with each new
 Codex release and each new Claude model version. A maintainer reading
@@ -69,21 +69,21 @@ If you are about to modify the skill:
 
 ### One paragraph
 
-`adversarial-review` is a Claude Code skill. The user types
-`/adversarial-review` in a Claude Code session; Claude (the "lead")
+`adversarial-review` is a Codex skill. The user types
+`/adversarial-review` in a Codex session; Codex (the "lead/master")
 writes an adversarial review prompt to a temp file, launches
-`codex exec` as a subprocess with the prompt on stdin, and captures the
+`gemini` as a subprocess with the prompt on stdin, and captures the
 reviewer's response to a `-o` file. Claude then shows the review to the
 user verbatim, applies fixes to the plan or code, and re-submits the
-revised state to the reviewer through `codex exec resume`. The loop
+revised state to the reviewer through `gemini resume`. The loop
 runs up to five rounds, or until the reviewer emits
 `VERDICT: APPROVED`.
 
 ### Roles
 
-- **Lead (Claude).** Orchestrator. Reads `SKILL.md`, runs the Bash /
+- **Lead (Codex).** Orchestrator. Reads `SKILL.md`, runs the Bash /
   Write / Read / Edit tools, authors the fixes, decides when to stop.
-- **Reviewer (Codex).** External AI process invoked per round. Receives
+- **Reviewer (Gemini 3.6 Flash xhigh).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in a read-only
   sandbox, emits a structured review with `VERDICT:`.
 - **User.** Reads the verbatim review Claude shows each round,
@@ -93,7 +93,7 @@ runs up to five rounds, or until the reviewer emits
 
 ```mermaid
 flowchart TD
-    A[launch: codex exec --json] --> B{checks: exit, stderr, review file}
+    A[launch: gemini --json] --> B{checks: exit, stderr, review file}
     B -- fail --> RETRY{retry budget}
     RETRY -- yes --> A
     RETRY -- no --> ABORT([abort, leave temp files])
@@ -102,13 +102,13 @@ flowchart TD
     V -- APPROVED --> APPROVED([Step 8: approved])
     V -- max rounds --> MAX([Step 8: max reached])
     V -- REVISE --> FIX[apply fixes]
-    FIX --> RESUME[resume: codex exec resume --json]
+    FIX --> RESUME[resume: gemini resume --json]
     RESUME --> C{checks: exit, stderr, review file}
     C -- ok --> SHOW
     C -- fail --> FB{fallback}
     FB -- interactive --> ASK[ask user: fresh exec or conclude]
     FB -- headless --> SEV{max severity}
-    ASK -- fresh --> FRESH[fresh codex exec + conv history]
+    ASK -- fresh --> FRESH[fresh gemini + conv history]
     ASK -- conclude --> NOTVER([Step 8: NOT VERIFIED])
     SEV -- critical/high --> FRESH
     SEV -- medium only --> NOTVER
@@ -122,7 +122,7 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(GPT via Codex CLI) reduces shared blind spots. The cost is an external
+(Google Gemini 3.6 Flash (effort xhigh) via Gemini CLI) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage.
 
@@ -141,8 +141,8 @@ can run in a few minutes.
 Two relevant subcommands:
 
 ```
-codex exec [OPTIONS] [PROMPT]
-codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+gemini [OPTIONS] [PROMPT]
+gemini resume [OPTIONS] [SESSION_ID] [PROMPT]
 ```
 
 Both accept PROMPT either as a trailing argument or as stdin. Two stdin
@@ -150,10 +150,10 @@ shapes are accepted by codex itself:
 
 ```bash
 # A. stdin redirect from file
-codex exec ... - < /tmp/codex-prompt-*.md
+gemini ... - < /tmp/gemini-prompt-*.md
 
 # B. pipe through cat
-cat /tmp/codex-prompt-*.md | codex exec ... -
+cat /tmp/gemini-prompt-*.md | gemini ... -
 ```
 
 **Both shapes work in some environments; only (B) works reliably in all
@@ -184,7 +184,7 @@ Two output modes, with different stream semantics:
 Verify:
 
 ```bash
-echo "respond PONG" | codex exec -m gpt-5.4 -s read-only \
+echo "respond PONG" | gemini --model gemini-3.6-flash -s read-only \
   -C "$(git rev-parse --show-toplevel)" - > /tmp/a.out 2> /tmp/a.err
 cat /tmp/a.err | grep 'session id:'
 cat /tmp/a.out
@@ -200,7 +200,7 @@ cat /tmp/a.out
 Verify:
 
 ```bash
-echo "respond PONG" | codex exec --json -m gpt-5.4 -s read-only \
+echo "respond PONG" | gemini --json --model gemini-3.6-flash -s read-only \
   -C "$(git rev-parse --show-toplevel)" - > /tmp/a.out 2> /tmp/a.err
 head -1 /tmp/a.out  # expect {"type":"thread.started",...}
 wc -c /tmp/a.err    # expect 0
@@ -224,15 +224,15 @@ human-readable review — stdout is machine-readable events only.
 
 ### §2.3. Session persistence
 
-Every non-ephemeral `codex exec` run creates a rollout file:
+Every non-ephemeral `gemini` run creates a rollout file:
 
 ```
-~/.codex/sessions/YYYY/MM/DD/rollout-TIMESTAMP-UUID.jsonl
+~/.gemini/sessions/YYYY/MM/DD/rollout-TIMESTAMP-UUID.jsonl
 ```
 
 Filename format: `rollout-<ISO-8601 timestamp with dashes>-<UUID>.jsonl`.
 The UUID is the session / thread id and is accepted verbatim by
-`codex exec resume`.
+`gemini resume`.
 
 `--ephemeral` disables persistence. Not used by the skill — resume
 requires persistence.
@@ -255,25 +255,25 @@ cat > /tmp/x-prompt.md <<EOF
 <!-- ${MARKER} -->
 respond PONG
 EOF
-cat /tmp/x-prompt.md | codex exec -m gpt-5.4 -s read-only \
+cat /tmp/x-prompt.md | gemini --model gemini-3.6-flash -s read-only \
   --skip-git-repo-check -o /tmp/x.md - >/dev/null 2>&1
-ROLLOUT=$(find ~/.codex/sessions -name 'rollout-*.jsonl' \
+ROLLOUT=$(find ~/.gemini/sessions -name 'rollout-*.jsonl' \
   -newer /tmp/x-prompt.md \
   -exec grep -l "${MARKER}" {} + 2>/dev/null | head -1)
 basename "${ROLLOUT}" .jsonl \
   | grep -oE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}'
-# expect: a UUID, and that UUID accepted by `codex exec resume`
+# expect: a UUID, and that UUID accepted by `gemini resume`
 rm -f /tmp/x-prompt.md /tmp/x.md
 ```
 
 ### §2.4. Resume semantics
 
 ```
-codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
-codex exec resume --last  # pick newest in cwd
+gemini resume [OPTIONS] [SESSION_ID] [PROMPT]
+gemini resume --last  # pick newest in cwd
 ```
 
-**Supported flags (per `codex exec resume --help`):** `--json`, `-o`,
+**Supported flags (per `gemini resume --help`):** `--json`, `-o`,
 `-m`, `-i`, `--last`, `--all`.
 
 **NOT supported:** `-s` (sandbox inherited from original session; always
@@ -293,24 +293,24 @@ Verify:
 mkdir -p /tmp/cwd-a /tmp/cwd-b
 cd /tmp/cwd-a && git init -q
 cd /tmp/cwd-b && git init -q
-cd /tmp/cwd-a && echo "respond ALPHA" | codex exec -s read-only \
+cd /tmp/cwd-a && echo "respond ALPHA" | gemini -s read-only \
   --skip-git-repo-check - 2>&1 | grep 'session id:'
-cd /tmp/cwd-b && echo "respond BRAVO" | codex exec -s read-only \
+cd /tmp/cwd-b && echo "respond BRAVO" | gemini -s read-only \
   --skip-git-repo-check - 2>&1 | grep 'session id:'
-cd /tmp/cwd-a && echo "which?" | codex exec resume --last \
+cd /tmp/cwd-a && echo "which?" | gemini resume --last \
   --skip-git-repo-check - 2>&1 | tail -5
 # expect: resumes ALPHA session, not BRAVO
 ```
 
 **§2.4.2. cwd is inherited from the shell, not the rollout.** The
-original `codex exec -C /repo ...` pins the session to `/repo` for its
-initial turn. A subsequent `codex exec resume <UUID>` from a *different*
+original `gemini -C /repo ...` pins the session to `/repo` for its
+initial turn. A subsequent `gemini resume <UUID>` from a *different*
 cwd does NOT inherit `/repo`. It either fails with
 `Not inside a trusted directory` (exit 1, no `-o` written), or silently
 runs with the new cwd. The skill works around this with `cd '<REPO_ROOT>' &&`
 as a command prefix before every resume (see `§4.3`).
 
-**§2.4.3. Bad UUID exit code.** `codex exec resume <non-existent-uuid>`
+**§2.4.3. Bad UUID exit code.** `gemini resume <non-existent-uuid>`
 exits with code **1** (not 0). stderr contains:
 
 ```
@@ -322,22 +322,22 @@ stdout is empty. `-o` file is NOT created.
 Verify:
 
 ```bash
-echo "hi" | codex exec resume 00000000-0000-0000-0000-000000000000 \
+echo "hi" | gemini resume 00000000-0000-0000-0000-000000000000 \
   --skip-git-repo-check - 2>/tmp/e.err
 echo "EXIT=$?"           # expect EXIT=1
 cat /tmp/e.err           # expect "thread/resume failed..." line
 ```
 
 **§2.4.4. Thread ID does not rotate across successful resumes.** Each
-successful `codex exec resume --json` emits a `thread.started` event
+successful `gemini resume --json` emits a `thread.started` event
 whose `thread_id` equals the original session's UUID. It is *not* a new
 id. The skill's rule "update `CODEX_SESSION_ID` on every successful
 resume" therefore is functionally a no-op on the current version, but
 remains defensive for future Codex versions that might rotate ids.
 
 Verify: compare the UUID in the first `thread.started` event of an
-initial `codex exec --json` with the UUID in the first `thread.started`
-event of `codex exec resume --json <that-UUID>`. Should be identical.
+initial `gemini --json` with the UUID in the first `thread.started`
+event of `gemini resume --json <that-UUID>`. Should be identical.
 
 ### §2.5. Known failure modes
 
@@ -359,8 +359,8 @@ The `- < file` exit-1-with-empty-stderr case is why the skill uses
 
 ### §2.6. CLI gaps relevant to the skill
 
-- `codex exec resume` does not accept `-C`.
-- `codex exec resume` did not accept `-o` before issue openai/codex#12538
+- `gemini resume` does not accept `-C`.
+- `gemini resume` did not accept `-o` before issue openai/codex#12538
   was resolved. On current versions it does.
 - `codex --version` prints `codex-cli 0.121.0` — not empty, despite one
   earlier agent's diagnostic claim (see `§6`).
@@ -435,9 +435,9 @@ Each decision below follows the same template:
 
 ### §4.1. Two-tier session ID capture (`--json` primary, attempt-scoped content-bind secondary)
 
-- **Decision.** Every `codex exec` and `codex exec resume` invocation
+- **Decision.** Every `gemini` and `gemini resume` invocation
   uses `--json` with stdout redirected to
-  `/tmp/codex-stdout-${REVIEW_ID}.jsonl`. Every prompt (initial, retry,
+  `/tmp/gemini-stdout-${REVIEW_ID}.jsonl`. Every prompt (initial, retry,
   resume, fresh-exec fallback) starts with a per-launch session marker
   `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` as
   its first line, where `${REVIEW_ID}` is review-stable and
@@ -449,8 +449,8 @@ Each decision below follows the same template:
     the prompt file AND contains this launch's specific attempt marker
     (grep), with UUID extracted from the filename:
     ```
-    find ~/.codex/sessions -name 'rollout-*.jsonl' \
-      -newer /tmp/codex-prompt-${REVIEW_ID}.md \
+    find ~/.gemini/sessions -name 'rollout-*.jsonl' \
+      -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
       -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} +
     ```
     All flags (`-newer FILE`, `-exec CMD {} +`, `grep -l`) are POSIX —
@@ -467,7 +467,7 @@ Each decision below follows the same template:
   least one Claude Code sandbox the JSONL stdout is suppressed (0 bytes)
   even on exit 0 with populated `-o` (`§2.2`, `§6.6`), and without a
   secondary path the skill cannot resume — every round becomes a fresh
-  `codex exec`, wasting tokens on project re-reads. An earlier iteration
+  `gemini`, wasting tokens on project re-reads. An earlier iteration
   of this secondary (mtime-only: newest rollout with mtime >
   `CODEX_SESSIONS_BEFORE`) was rejected in Round 6 because it binds on
   timing alone — parallel codex creates a newer rollout that is
@@ -500,7 +500,7 @@ Each decision below follows the same template:
     marker (`REVIEW_ID-ATTEMPT_ID`) eliminates this because every
     launch gets a fresh ATTEMPT_ID.
   - *Write a dedicated marker file on disk (e.g.,
-    `/tmp/codex-start-${REVIEW_ID}.marker`) and grep rollouts for that
+    `/tmp/gemini-start-${REVIEW_ID}.marker`) and grep rollouts for that
     file's path.* Rejected: adds another temp-file artifact to manage
     and clean up. The prompt file is already written for the launch
     and can serve as both the `-newer` anchor and (via embedded
@@ -531,7 +531,7 @@ Each decision below follows the same template:
     AND only when verdict is `REVISE` (Step 4 check order). This
     avoids aborting a valid round-1 APPROVED over a secondary
     failure: APPROVED means no resume, no session-id needed.
-  - Extra permission surface: `Bash(find ~/.codex/sessions*)` in the
+  - Extra permission surface: `Bash(find ~/.gemini/sessions*)` in the
     recommended permissions list.
 
 ### §4.2. Capture `REPO_ROOT` at Step 2, substitute literally
@@ -556,8 +556,8 @@ Each decision below follows the same template:
 
 ### §4.3. Hybrid cwd pinning: `-C` for initial, `cd` prefix for resume
 
-- **Decision.** Initial `codex exec` uses `-C "${REPO_ROOT}"`. Resume
-  uses a shell prefix: `cd '${REPO_ROOT}' && codex exec resume ...`.
+- **Decision.** Initial `gemini` uses `-C "${REPO_ROOT}"`. Resume
+  uses a shell prefix: `cd '${REPO_ROOT}' && gemini resume ...`.
 - **Where in SKILL.md.** Steps 4 and 7.
 - **Context.** Codex's `exec` accepts `-C`; `resume` does not. Resume
   inherits cwd from the invoking shell.
@@ -571,7 +571,7 @@ Each decision below follows the same template:
   what each subcommand actually supports.
 - **Trade-offs accepted.** Two slightly different command shapes in
   `SKILL.md`; one extra permission pattern in README
-  (`Bash(cd * && timeout 600 codex exec resume *)`).
+  (`Bash(cd * && timeout 600 gemini resume *)`).
 
 ### §4.4. Conditional `CODEX_SESSION_ID` update (only on full success)
 
@@ -597,10 +597,10 @@ Each decision below follows the same template:
 
 ### §4.5. No `--last` in any fallback
 
-- **Decision.** The fallback chain does not use `codex exec resume --last`.
+- **Decision.** The fallback chain does not use `gemini resume --last`.
   On resume failure the skill either asks the user (interactive) or
   chooses by severity (headless); the "retry" option is always a fresh
-  `codex exec`, not `--last`.
+  `gemini`, not `--last`.
 - **Where in SKILL.md.** Step 7 fallback.
 - **Context.** `--last` silently picks the newest session in the
   current cwd (§2.4.1), which can be an unrelated one-shot or a
@@ -619,13 +619,13 @@ Each decision below follows the same template:
 
 ### §4.6. Fresh-exec fallback rebuilds context from conversation history
 
-- **Decision.** When the fallback triggers a fresh `codex exec`, Claude
+- **Decision.** When the fallback triggers a fresh `gemini`, Claude
   reconstructs the "previous rounds" section of the prompt from the
   conversation — the round-1 review, round-1 fixes, round-2 review,
   round-2 fixes, etc. — which were already shown verbatim to the user
   in earlier Step 5 outputs.
 - **Where in SKILL.md.** Step 7 fallback prompt template.
-- **Context.** The `-o` file at `/tmp/codex-review-${REVIEW_ID}.md` is
+- **Context.** The `-o` file at `/tmp/gemini-review-${REVIEW_ID}.md` is
   overwritten on every round. Round-1 review content is gone from disk
   by the time a round-3 fallback triggers.
 - **Alternatives considered.**
@@ -667,7 +667,7 @@ Each decision below follows the same template:
 
 ### §4.8. Strict check order: exit → stderr → review → (session-id when needed)
 
-- **Decision.** After every `codex exec` / `codex exec resume` call,
+- **Decision.** After every `gemini` / `gemini resume` call,
   checks run in a fixed order:
   1. Exit code.
   2. Stderr file (even on exit 0).
@@ -685,7 +685,7 @@ Each decision below follows the same template:
   and a valid APPROVED review completes without depending on
   session-id capture. An earlier draft ordered session-id *before*
   review-sanity, which meant a secondary-capture failure (e.g.,
-  empty `~/.codex/sessions/` on a first-ever codex run, or a rollout
+  empty `~/.gemini/sessions/` on a first-ever codex run, or a rollout
   that somehow lacked the session marker) would abort an otherwise-
   successful APPROVED round. The current order avoids that.
 - **Alternatives considered.**
@@ -712,7 +712,7 @@ Each decision below follows the same template:
   instructions can be internally rationalized away (§3.4).
 - **Alternatives considered.**
   - *Marker-file precondition* — Claude writes
-    `/tmp/codex-review-${REVIEW_ID}.shown` as the act of showing; Step
+    `/tmp/gemini-review-${REVIEW_ID}.shown` as the act of showing; Step
     6 verifies the file exists. Rejected: cargo-cult risk. A literal
     reader that skips the show step may still write the marker,
     producing a false audit trail that is worse than no trail. And the
@@ -730,7 +730,7 @@ Each decision below follows the same template:
 
 ### §4.10. Conditional cleanup (keep temp files on abort)
 
-- **Decision.** Step 9 cleans up `/tmp/codex-*-${REVIEW_ID}.*` only on
+- **Decision.** Step 9 cleans up `/tmp/gemini-*-${REVIEW_ID}.*` only on
   success paths (APPROVED, MAX rounds, NOT VERIFIED). On abort paths
   (launch failure, infrastructure error), the files are left in place.
 - **Where in SKILL.md.** Step 9.
@@ -799,11 +799,11 @@ Each decision below follows the same template:
   rounds, retry budget is inconsistently available. Rules section of
   `SKILL.md` states this explicitly.
 
-### §4.13. Canonical prompt delivery via `cat file | codex exec -`
+### §4.13. Canonical prompt delivery via `cat file | gemini -`
 
-- **Decision.** The skill feeds prompts to `codex exec` via
-  `cat /tmp/codex-prompt-*.md | timeout 600 codex exec ... -` instead
-  of `codex exec ... - < /tmp/codex-prompt-*.md`.
+- **Decision.** The skill feeds prompts to `gemini` via
+  `cat /tmp/gemini-prompt-*.md | timeout 600 gemini ... -` instead
+  of `gemini ... - < /tmp/gemini-prompt-*.md`.
 - **Where in SKILL.md.** Step 4 (launch), Step 7 (resume), Step 7
   fresh-exec fallback.
 - **Context.** Both shapes are accepted by codex itself (`§2.1`). In
@@ -817,12 +817,12 @@ Each decision below follows the same template:
     target environment.
   - *Branch by environment (detect sandbox, switch form).* Rejected:
     over-complicated for a Pareto case. `cat | pipe` is universal.
-  - *Use the trailing-argument form (`codex exec ... "$(cat file)"`).*
+  - *Use the trailing-argument form (`gemini ... "$(cat file)"`).*
     Rejected: shell quoting on long XML prompts is the exact problem
     file delivery solves.
 - **Chosen because.** `cat | pipe` works in every observed environment
   at no extra cost. The only visible artifact is in the permission
-  rule (`Bash(cat /tmp/codex-prompt-* | timeout 600 codex exec *)`)
+  rule (`Bash(cat /tmp/gemini-prompt-* | timeout 600 gemini *)`)
   which is still prefix-matchable.
 - **Trade-offs accepted.** One extra process (`cat`) per codex launch
   — negligible. The pipeline exit code semantics are `$?` = last
@@ -840,7 +840,7 @@ re-propose them without reading why.
 ### §5.1. Marker file (`.shown` precondition)
 
 Round 2 adversarial review proposed requiring the lead to write
-`/tmp/codex-review-${REVIEW_ID}.shown` as an atomic "I have shown the
+`/tmp/gemini-review-${REVIEW_ID}.shown` as an atomic "I have shown the
 review" signal, with Step 6 hard-gating on its existence.
 
 Rejected: the marker is itself an instructional artifact. A literal
@@ -852,7 +852,7 @@ making review text inaccessible from Bash output, forcing a Read).
 ### §5.2. Per-round file naming
 
 Proposed during Round 2 review: name temp files with both `${REVIEW_ID}`
-and round number (`/tmp/codex-review-${REVIEW_ID}-r1.md`,
+and round number (`/tmp/gemini-review-${REVIEW_ID}-r1.md`,
 `...-r2.md`). Benefits: prior-round diagnostics survive later rounds;
 fresh-exec fallback can read prior review text from disk.
 
@@ -876,7 +876,7 @@ pattern (§4.2).
 
 ### §5.5. Auto-fresh-exec without user consent on resume failure
 
-Earlier skill drafts silently ran a fresh `codex exec` whenever resume
+Earlier skill drafts silently ran a fresh `gemini` whenever resume
 failed. This burned significant tokens (each fresh exec is a full
 project re-read) for cases that sometimes were not worth re-verifying
 (e.g., only medium-severity findings). Replaced by ask-user /
@@ -900,7 +900,7 @@ here as a lesson, not as blame.
 ### §6.1. "Codex stderr is 0 bytes — no `session id:` line is printed"
 
 **Claim.** The auditor's dump claimed that redirecting stderr to a file
-during `codex exec` produced an empty file, across eight observed
+during `gemini` produced an empty file, across eight observed
 invocations.
 
 **Reality.** In non-`--json` mode, stderr contains a multi-line
@@ -922,7 +922,7 @@ Different root cause; different fix (`--json` for first-line parsing,
 
 **Impact on the design.** Minor — but indicative of measurement sloppiness.
 
-### §6.3. "`codex exec resume --last` is unsafe"
+### §6.3. "`gemini resume --last` is unsafe"
 
 **Claim.** The dump implied `--last` picks an arbitrary session.
 
@@ -934,10 +934,10 @@ fix (drop `--last` entirely, §4.5) was driven by the specific risk of
 context injection into user's parallel codex sessions, not by any
 general unsafety.
 
-### §6.4. "`codex exec resume <bad-uuid>` exits with code 0"
+### §6.4. "`gemini resume <bad-uuid>` exits with code 0"
 
 **Claim.** The dump (and the first round of adversarial review of our
-own plan) both asserted that `codex exec resume` with an invalid UUID
+own plan) both asserted that `gemini resume` with an invalid UUID
 exits 0 — making exit code useless as a success signal.
 
 **Reality.** It exits **1**. stderr has `thread/resume failed`. stdout
@@ -961,9 +961,9 @@ minutes, not hours.
 **Claim trajectory.** An agent running in a different Claude Code
 sandbox reported three issues with the skill:
 
-1. `codex exec ... - < /tmp/prompt.md` exits 1 with empty stderr.
-2. `cat file | codex exec --json ... -` exits 0 with review file OK
-   but `/tmp/codex-stdout-*.jsonl` empty (0 bytes).
+1. `gemini ... - < /tmp/prompt.md` exits 1 with empty stderr.
+2. `cat file | gemini --json ... -` exits 0 with review file OK
+   but `/tmp/gemini-stdout-*.jsonl` empty (0 bytes).
 3. Same symptoms under `timeout 120 bash -c '...'` wrapper.
 
 Initial hypothesis: codex version bug. The agent was on 0.120.0,
@@ -1019,7 +1019,7 @@ window + `--last` being unused were argued as sufficient mitigation.
 shell on the same machine (user running `codex` in another terminal,
 a CI job, a hook, etc.) creates a newer rollout during the review's
 exec window. The skill's `find -newermt + pick newest` then captures
-that unrelated UUID. `codex exec resume <UUID>` succeeds against that
+that unrelated UUID. `gemini resume <UUID>` succeeds against that
 thread, returns a normally-shaped review (`VERDICT:`, `[severity:`)
 for an unrelated artifact, and Step 7's post-resume checks pass. The
 skill applies "fixes" informed by a review of some other work.
@@ -1059,7 +1059,7 @@ no-match is the correct default.
 
 **Claim trajectory.** Round 6 (§6.7) introduced positive content-bind
 via `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID} -->`. The live
-e2e test of that design via `codex exec` (round 2 of the dogfood
+e2e test of that design via `gemini` (round 2 of the dogfood
 loop) flagged a narrower but still real gap: the marker is stable
 across the whole review, not per-launch.
 
@@ -1071,7 +1071,7 @@ rollout already contains the `${REVIEW_ID}` marker. The retry's
 fallback grep matches BOTH the first attempt's rollout AND the
 second (successful) attempt's rollout. The skill's "pick any"
 branch then silently picks either — if it picks the first
-(stale) rollout's UUID, later `codex exec resume` continues a
+(stale) rollout's UUID, later `gemini resume` continues a
 dead session with content from a failed attempt. All of Step 7's
 post-resume checks would pass on that wrong session.
 
@@ -1113,7 +1113,7 @@ the repo root. Expected outputs are in comments.
 REVIEW_ID=$(date +%s)-$(printf '%08d' $RANDOM)
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
 REPO_ROOT=$(git rev-parse --show-toplevel)
-cat > /tmp/codex-prompt-${REVIEW_ID}.md <<EOF
+cat > /tmp/gemini-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 <role>
 You are a senior adversarial reviewer of implementation plans.
@@ -1126,23 +1126,23 @@ End the LAST line with exactly: VERDICT: APPROVED
 </output_format>
 EOF
 
-cat /tmp/codex-prompt-${REVIEW_ID}.md | timeout 300 codex exec --json \
-  -m gpt-5.4 -c model_reasoning_effort=low \
+cat /tmp/gemini-prompt-${REVIEW_ID}.md | timeout 300 gemini --json \
+  --model gemini-3.6-flash -c reasoning_effort=xhigh \
   -s read-only -C "${REPO_ROOT}" \
-  -o /tmp/codex-review-${REVIEW_ID}.md \
+  -o /tmp/gemini-review-${REVIEW_ID}.md \
   - \
-  > /tmp/codex-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/codex-stderr-${REVIEW_ID}.txt
+  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
 
 echo "EXIT=$?"                                          # expect 0
-head -1 /tmp/codex-stdout-${REVIEW_ID}.jsonl            # reference env: thread.started; affected env: empty
-wc -c /tmp/codex-stderr-${REVIEW_ID}.txt                # expect 0
-grep -E '^VERDICT:' /tmp/codex-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
+head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl            # reference env: thread.started; affected env: empty
+wc -c /tmp/gemini-stderr-${REVIEW_ID}.txt                # expect 0
+grep -E '^VERDICT:' /tmp/gemini-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 
 # Verify the filesystem secondary path also works (§4.1b) — attempt-scoped content-bind.
 # Returns the rollout path that both postdates our prompt file AND contains the per-launch marker.
-find ~/.codex/sessions -name 'rollout-*.jsonl' \
-  -newer /tmp/codex-prompt-${REVIEW_ID}.md \
+find ~/.gemini/sessions -name 'rollout-*.jsonl' \
+  -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
   -exec grep -l "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" {} + 2>/dev/null
 # expect: exactly one path. Extract the UUID from basename — it must equal the
 # thread_id from the primary path above (if the primary was populated).
@@ -1154,12 +1154,12 @@ Continuing from §7.1 — extract the thread id and resume.
 
 ```bash
 # Primary session-id capture (may be empty in affected sandboxes)
-THREAD_ID=$(head -1 /tmp/codex-stdout-${REVIEW_ID}.jsonl \
+THREAD_ID=$(head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
   | grep -oE '"thread_id":"[^"]+"' | cut -d'"' -f4)
 # Secondary: attempt-scoped content-bind (§4.1b). POSIX-portable.
 if [ -z "${THREAD_ID}" ]; then
-  ROLLOUT=$(find ~/.codex/sessions -name 'rollout-*.jsonl' \
-    -newer /tmp/codex-prompt-${REVIEW_ID}.md \
+  ROLLOUT=$(find ~/.gemini/sessions -name 'rollout-*.jsonl' \
+    -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
     -exec grep -l "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" {} + 2>/dev/null \
     | head -1)
   THREAD_ID=$(basename "${ROLLOUT}" .jsonl \
@@ -1169,38 +1169,38 @@ echo "THREAD_ID=${THREAD_ID}"                           # expect a UUID
 
 # Fresh ATTEMPT_ID for the resume launch
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
-cat > /tmp/codex-resume-prompt-${REVIEW_ID}.md <<EOF
+cat > /tmp/gemini-resume-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 Still there? Reply with VERDICT: APPROVED.
 EOF
 
-cd "${REPO_ROOT}" && cat /tmp/codex-resume-prompt-${REVIEW_ID}.md \
-  | timeout 300 codex exec resume --json \
+cd "${REPO_ROOT}" && cat /tmp/gemini-resume-prompt-${REVIEW_ID}.md \
+  | timeout 300 gemini resume --json \
   "${THREAD_ID}" \
-  -o /tmp/codex-review-${REVIEW_ID}.md \
+  -o /tmp/gemini-review-${REVIEW_ID}.md \
   - \
-  > /tmp/codex-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/codex-stderr-${REVIEW_ID}.txt
+  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
 
 echo "EXIT=$?"                                          # expect 0
-head -1 /tmp/codex-stdout-${REVIEW_ID}.jsonl            # reference env: same thread_id (§2.4.4); affected env: empty
-wc -c /tmp/codex-stderr-${REVIEW_ID}.txt                # expect 0
-grep -E '^VERDICT:' /tmp/codex-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
+head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl            # reference env: same thread_id (§2.4.4); affected env: empty
+wc -c /tmp/gemini-stderr-${REVIEW_ID}.txt                # expect 0
+grep -E '^VERDICT:' /tmp/gemini-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 ```
 
 ### §7.3. Resume with bad UUID
 
 ```bash
-echo "test" > /tmp/codex-bad-resume-prompt.md
-cat /tmp/codex-bad-resume-prompt.md | timeout 60 codex exec resume --json \
+echo "test" > /tmp/gemini-bad-resume-prompt.md
+cat /tmp/gemini-bad-resume-prompt.md | timeout 60 gemini resume --json \
   00000000-0000-0000-0000-000000000000 \
   - \
-  > /tmp/codex-bad-resume.stdout \
-  2>/tmp/codex-bad-resume.stderr
+  > /tmp/gemini-bad-resume.stdout \
+  2>/tmp/gemini-bad-resume.stderr
 
 echo "EXIT=$?"                                          # expect 1
-cat /tmp/codex-bad-resume.stderr | head -3              # expect "thread/resume failed" line
-wc -c /tmp/codex-bad-resume.stdout                      # expect 0
+cat /tmp/gemini-bad-resume.stderr | head -3              # expect "thread/resume failed" line
+wc -c /tmp/gemini-bad-resume.stdout                      # expect 0
 ```
 
 ### §7.4. Bare repo detection
@@ -1223,16 +1223,16 @@ mkdir -p /tmp/smoke-cwd-a /tmp/smoke-cwd-b
 ( cd /tmp/smoke-cwd-b && git init -q )
 # run codex in each; capture session ids
 ID_A=$(cd /tmp/smoke-cwd-a && echo "ALPHA" | \
-  codex exec -s read-only -m gpt-5.4 \
-  -c model_reasoning_effort=low - 2>&1 | grep 'session id:' | awk '{print $3}')
+  gemini -s read-only --model gemini-3.6-flash \
+  -c reasoning_effort=xhigh - 2>&1 | grep 'session id:' | awk '{print $3}')
 ID_B=$(cd /tmp/smoke-cwd-b && echo "BRAVO" | \
-  codex exec -s read-only -m gpt-5.4 \
-  -c model_reasoning_effort=low - 2>&1 | grep 'session id:' | awk '{print $3}')
+  gemini -s read-only --model gemini-3.6-flash \
+  -c reasoning_effort=xhigh - 2>&1 | grep 'session id:' | awk '{print $3}')
 echo "A=${ID_A}"
 echo "B=${ID_B}"
 # resume --last from cwd-a; expect to resume ID_A, not ID_B
 ( cd /tmp/smoke-cwd-a && echo "which?" | \
-  codex exec resume --last - 2>&1 | grep 'session id:' )
+  gemini resume --last - 2>&1 | grep 'session id:' )
 # expect: session id matches ID_A
 rm -rf /tmp/smoke-cwd-a /tmp/smoke-cwd-b
 ```
@@ -1240,14 +1240,14 @@ rm -rf /tmp/smoke-cwd-a /tmp/smoke-cwd-b
 ### §7.6. Cleanup smoke artifacts
 
 ```bash
-rm -f /tmp/codex-prompt-${REVIEW_ID}.md \
-      /tmp/codex-resume-prompt-${REVIEW_ID}.md \
-      /tmp/codex-review-${REVIEW_ID}.md \
-      /tmp/codex-stdout-${REVIEW_ID}.jsonl \
-      /tmp/codex-stderr-${REVIEW_ID}.txt \
-      /tmp/codex-bad-resume-prompt.md \
-      /tmp/codex-bad-resume.stdout \
-      /tmp/codex-bad-resume.stderr
+rm -f /tmp/gemini-prompt-${REVIEW_ID}.md \
+      /tmp/gemini-resume-prompt-${REVIEW_ID}.md \
+      /tmp/gemini-review-${REVIEW_ID}.md \
+      /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
+      /tmp/gemini-stderr-${REVIEW_ID}.txt \
+      /tmp/gemini-bad-resume-prompt.md \
+      /tmp/gemini-bad-resume.stdout \
+      /tmp/gemini-bad-resume.stderr
 ```
 
 ### §7.7. If anything fails
@@ -1284,8 +1284,8 @@ triggered by §7.7), add a row. Keep the log chronological.
 
 ### §9.1. Parallel codex in the same cwd
 
-If the user runs `codex exec` manually in the same working tree while
-the skill is mid-review, `~/.codex/sessions/` will contain sessions
+If the user runs `gemini` manually in the same working tree while
+the skill is mid-review, `~/.gemini/sessions/` will contain sessions
 from both processes. The skill does not use `--last`, so this does not
 cause wrong-session hazards, but the user's parallel work may produce
 rollout files that are filesystem-level noise during debugging.
@@ -1341,10 +1341,10 @@ been end-to-end tested on macOS. Edge cases that may differ:
 - Default shell (zsh on modern macOS vs bash on Linux) — the skill's
   Bash-tool commands do not rely on bash-specific features (the
   `cat | pipe` form is POSIX), so this is unlikely to matter.
-- `~/.codex/sessions` layout — expected identical on both platforms
+- `~/.gemini/sessions` layout — expected identical on both platforms
   (codex-cli is cross-platform).
-- Permission prompts for `find ~/.codex/sessions*` — should match
-  the pattern on any Claude Code harness.
+- Permission prompts for `find ~/.gemini/sessions*` — should match
+  the pattern on any Codex harness.
 
 If a macOS user reports breakage, add findings to `§6` and file a
 version-log row in `§8`.
@@ -1385,7 +1385,7 @@ Revise this document when any of the following happens:
   more explicit "DO NOT" lists, more explicit procedural anchors
   ("YOUR NEXT MESSAGE", "BEFORE calling any fix tool", etc.), and
   update §3.4 to record the observed literal interpretation.
-- **Claude Code harness updates.** If Bash tool truncation size
+- **Codex harness updates.** If Bash tool truncation size
   changes, if cwd behavior between calls changes, if new
   safety rules appear, update §3.
 - **A reviewer finds a new failure mode.** Add a finding to §5 (if
@@ -1451,7 +1451,7 @@ Before this split, the entire skill ran in the main Claude thread. Each round's 
 
 Claude Code's Agent tool dispatches a fresh subagent with its own isolated context. When the subagent returns, its context is discarded; only its final text message crosses to main. By making the runner subagent own every codex-exec artifact and return only a ~1KB JSON summary file plus the small review file path, the main thread no longer pays the residue tax.
 
-The runner uses a two-channel protocol: the authoritative structured result is written to `/tmp/codex-runner-result-${REVIEW_ID}.json`, and the runner's final message is a single `RUNNER_RESULT_AT: <path>` line. Main extracts the path with a tolerant regex (markdown fences and minor wrapping do not break parsing) and reads the JSON file directly. This avoids the brittle "raw JSON in message" contract that Sonnet's conversational output style would otherwise stress.
+The runner uses a two-channel protocol: the authoritative structured result is written to `/tmp/gemini-runner-result-${REVIEW_ID}.json`, and the runner's final message is a single `RUNNER_RESULT_AT: <path>` line. Main extracts the path with a tolerant regex (markdown fences and minor wrapping do not break parsing) and reads the JSON file directly. This avoids the brittle "raw JSON in message" contract that Sonnet's conversational output style would otherwise stress.
 
 **Runner spec is passed by path, not inlined.** Main resolves `RUNNER_SPEC_PATH` (3-tier filesystem lookup in SKILL.md Step 4) and passes the absolute path to the subagent — the subagent Reads runner.md itself. Main never Reads runner.md. Rationale: inlining the full spec (~12K) into every Agent-tool prompt would re-add ~12K × rounds (up to 5) to main's context per review — 60K of avoidable overhead. Bootstrap instruction in the Agent prompt is ~400 bytes; the spec lives only in the disposable subagent context.
 
@@ -1465,7 +1465,7 @@ Fresh-exec fallback is a *separate round* that consumes a round counter slot and
 
 ### §12.4 Archival ownership
 
-Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr so they survive the next dispatch's file-reuse. Pre-refactor, main did this via its own `mv`. Post-refactor the runner does it inside Step R5 (only on resume failure). Rationale: main never references `/tmp/codex-stdout-*` or `/tmp/codex-stderr-*` paths in its own Bash argv, strengthening the isolation claim (no leak by path-reference). Archived paths are returned in the result JSON as `archived_stdout` / `archived_stderr`; main includes them in Step 9 cleanup per its unchanged `rm` glob.
+Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr so they survive the next dispatch's file-reuse. Pre-refactor, main did this via its own `mv`. Post-refactor the runner does it inside Step R5 (only on resume failure). Rationale: main never references `/tmp/gemini-stdout-*` or `/tmp/gemini-stderr-*` paths in its own Bash argv, strengthening the isolation claim (no leak by path-reference). Archived paths are returned in the result JSON as `archived_stdout` / `archived_stderr`; main includes them in Step 9 cleanup per its unchanged `rm` glob.
 
 ### §12.5 Model choice
 
@@ -1482,9 +1482,9 @@ The attempt-scoped `ADVERSARIAL-REVIEW-SESSION` marker (round-7 finding) and pos
 > **Status:** this subsection is empirically determined by Task 7 Step 4's Plan Mode smoke test. Until that task runs and the implementer updates this subsection with observed behavior, treat every claim here as a HYPOTHESIS, not documented fact.
 
 **Hypothesis to test:** Plan Mode restrictions propagate from main to any subagent main dispatches; the subagent inherits limitations on Write/Edit/Bash. If this holds:
-- Main's Write to `/tmp/codex-body-*.md` may trigger a permission prompt or exit Plan Mode.
-- The runner's Writes to `/tmp/codex-prompt-*.md` (Step R2, including the mtime-bump repeat Write) may also trigger prompts.
-- The runner's `codex exec` (read-only sandbox) should be unaffected since it writes nothing to the user's repo.
+- Main's Write to `/tmp/gemini-body-*.md` may trigger a permission prompt or exit Plan Mode.
+- The runner's Writes to `/tmp/gemini-prompt-*.md` (Step R2, including the mtime-bump repeat Write) may also trigger prompts.
+- The runner's `gemini` (read-only sandbox) should be unaffected since it writes nothing to the user's repo.
 
 **What Task 7 Step 4 must determine:**
 1. Does dispatching the Agent tool from Plan Mode work (is it blocked, does it prompt, does it just work)?
