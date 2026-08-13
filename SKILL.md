@@ -1,14 +1,13 @@
 ---
 name: adversarial-review
-description: Adversarial AI code/plan review. Gemini (model gemini-3.6-flash, effort xhigh) reviews, Codex fixes, iterative loop until approved. Auto-detects plan/code/code-vs-plan mode.
-user_invocable: true
+description: Adversarial AI code/plan review. Antigravity (model gemini-3.7-flash, effort high) reviews, Codex fixes, iterative loop until approved. Auto-detects plan/code/code-vs-plan mode.
 ---
 
 # Adversarial Code Review
 
-> **Platform:** Codex CLI only. This skill orchestrates Codex ↔ Gemini interaction, where Codex is the executor and Gemini is the external reviewer. Running this skill from Gemini CLI itself creates a recursive loop — Gemini would try to launch itself. If you are Gemini — do NOT invoke this skill; perform the review directly.
+> **Platform:** Codex CLI only. This skill orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. Running this skill from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
 
-Sends current work for adversarial review through an external AI model (Google Gemini by default, model `gemini-3.6-flash`, reasoning effort `xhigh`). Auto-detects what to review: **plan** or **code**. Codex fixes issues based on reviewer feedback and resubmits until approved. Maximum 5 rounds.
+Sends current work for adversarial review through an external AI model (Antigravity CLI by default, model `gemini-3.7-flash`). Auto-detects what to review: **plan** or **code**. Codex fixes issues based on reviewer feedback and resubmits until approved. Maximum 5 rounds.
 
 ---
 
@@ -18,12 +17,11 @@ Sends current work for adversarial review through an external AI model (Google G
 - `/adversarial-review plan` — force plan review
 - `/adversarial-review code` — force code review
 - `/adversarial-review <file-path>` — review a specific file (argument contains `/` or `.`)
-- Override reasoning: `/adversarial-review xhigh` or `/adversarial-review medium` or `/adversarial-review high` (one of: `low`, `medium`, `high`, `xhigh`)
-- Override model: `/adversarial-review model:gemini-3.6-flash` (argument with `model:` prefix)
+- Override model: `/adversarial-review model:gemini-3.7-flash` (argument with `model:` prefix)
 
 ## Instructions
 
-> **Placeholders:** `${REVIEW_ID}`, `${ATTEMPT_ID}`, `${GEMINI_SESSION_ID}`, `${REPO_ROOT}`, and `${BASE_BRANCH}` in the steps below are template placeholders, NOT shell variables. Substitute literal values directly into each tool call. In particular:
+> **Placeholders:** `${REVIEW_ID}`, `${ATTEMPT_ID}`, `${AGY_CONVERSATION_ID}`, `${REPO_ROOT}`, and `${BASE_BRANCH}` in the steps below are template placeholders, NOT shell variables. Substitute literal values directly into each tool call. In particular:
 > - `${REPO_ROOT}` is ALWAYS an absolute path captured at Step 2; never replace it with `$(pwd)`.
 > - `${REVIEW_ID}` is stable for the entire review (used in file paths).
 > - `${ATTEMPT_ID}` is a fresh 6-digit random integer generated **per launch** — a new value for the initial exec, for any retry of that exec, for every resume in Step 7, and for any fresh-exec fallback. The combined marker `${REVIEW_ID}-${ATTEMPT_ID}` is embedded in the prompt (HTML comment) so the filesystem session-id fallback identifies exactly THIS launch's rollout. Do NOT reuse a prior launch's ATTEMPT_ID — that would make multiple rollouts match and reintroduce silent session drift.
@@ -98,7 +96,7 @@ Save the result as `BASE_BRANCH` — used in `git diff ${BASE_BRANCH}...HEAD` be
 **Plan review:**
 
 - If the plan already exists as a file (in `project/`, plan file from Plan Mode, memory, or somewhere in the repo) — use the path directly. Do NOT copy. In Codex Plan Mode the plan is always a file.
-- If the plan is only in the conversation context (outside Plan Mode) — write via **Write tool** to `/tmp/gemini-plan-${REVIEW_ID}.md`.
+- If the plan is only in the conversation context (outside Plan Mode) — write via **Write tool** to `/tmp/agy-plan-${REVIEW_ID}.md`.
 - **Always print the plan file path for the user** so they can open it in their IDE:
   `Plan for review: <file-path>`
 
@@ -136,6 +134,7 @@ Main thread composes the prompt BODY (without the session marker — the subagen
 <role>
 You are a senior adversarial reviewer of implementation plans.
 Your job is to break confidence in the plan, not to validate it.
+Operate read-only: inspect the plan and repository, but never modify any file.
 </role>
 
 <operating_stance>
@@ -204,6 +203,7 @@ VERDICT: REVISE
 <role>
 You are a senior adversarial code reviewer.
 Your job is to break confidence in the change, not to validate it.
+Operate read-only: inspect the diff and repository, but never modify any file.
 </role>
 
 <operating_stance>
@@ -312,18 +312,17 @@ The inlined prompt bodies above contain template placeholders that main must res
 
 Substitute `${BASE_BRANCH}` first (it appears nested inside `<unstaged changes / staged changes / ...>`), then compute the outer human-readable description based on which diffs have content. Main writes the substituted string to the Write tool — no template placeholders should remain in the body file sent to the runner.
 
-**Capture user overrides for `GEMINI_MODEL` / `GEMINI_REASONING` at Step 1:**
+**Capture user overrides for `AGY_MODEL` at Step 1:**
 
-The skill supports overrides like `/adversarial-review xhigh`, `/adversarial-review medium`, `/adversarial-review model:gemini-3.6-flash`. At Step 1, capture:
+The skill supports overrides like `/adversarial-review model:gemini-3.7-flash`. At Step 1, capture:
 
-- `GEMINI_MODEL` — default `gemini-3.6-flash`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
-- `GEMINI_REASONING` — default `xhigh`. Overridden by any argument exactly matching `low`, `medium`, `high`, or `xhigh`.
+- `AGY_MODEL` — default `gemini-3.7-flash`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
 
 These are passed into the runner YAML input block below.
 
 **Write the prompt body to disk via Write tool:**
 
-Write `/tmp/gemini-body-${REVIEW_ID}.md` containing the substituted body text (no session marker — the runner adds it).
+Write `/tmp/agy-body-${REVIEW_ID}.md` containing the substituted body text (no session marker — the runner adds it).
 
 > **Plan Mode note:** Writing to `/tmp` via Write tool may trigger a permission prompt or exit Plan Mode. Additionally, dispatching a subagent under Plan Mode may inherit the restriction — empirical behavior documented in DESIGN.md §12.7.
 
@@ -373,14 +372,13 @@ Read your full instruction spec at ${RUNNER_SPEC_PATH} and follow the steps ther
 REVIEW_ID: 1711872000-48217593
 REPO_ROOT: /home/dementev/sources/myproject
 OPERATION: initial
-GEMINI_MODEL: gemini-3.6-flash
-GEMINI_REASONING: xhigh
-PROMPT_BODY_PATH: /tmp/gemini-body-1711872000-48217593.md
-RESULT_PATH: /tmp/gemini-runner-result-1711872000-48217593.json
+AGY_MODEL: gemini-3.7-flash
+PROMPT_BODY_PATH: /tmp/agy-body-1711872000-48217593.md
+RESULT_PATH: /tmp/agy-runner-result-1711872000-48217593.json
 ---
 ```
 
-Substitute the actual resolved `${RUNNER_SPEC_PATH}` (absolute path) and real values for every other placeholder. `RESULT_PATH` always follows the pattern `/tmp/gemini-runner-result-${REVIEW_ID}.json`.
+Substitute the actual resolved `${RUNNER_SPEC_PATH}` (absolute path) and real values for every other placeholder. `RESULT_PATH` always follows the pattern `/tmp/agy-runner-result-${REVIEW_ID}.json`.
 
 **Do NOT run the Agent tool call in background.** Wait for the subagent to return.
 
@@ -388,9 +386,9 @@ Substitute the actual resolved `${RUNNER_SPEC_PATH}` (absolute path) and real va
 
 Apply the regex `RUNNER_RESULT_AT:\s+(\S+)` (UNANCHORED — matches anywhere in the Agent tool's result text, tolerant of markdown fences and preamble). Take the first match's capture group as the result-file path.
 
-If the regex finds NO match in the subagent's response, fall back to a Glob for the deterministic path `/tmp/gemini-runner-result-${REVIEW_ID}.json` — REVIEW_ID is already known to main. If Glob also returns nothing, treat as `infra_error` with `errors: "runner did not write result file at deterministic path and did not emit RUNNER_RESULT_AT line"` and abort.
+If the regex finds NO match in the subagent's response, fall back to a Glob for the deterministic path `/tmp/agy-runner-result-${REVIEW_ID}.json` — REVIEW_ID is already known to main. If Glob also returns nothing, treat as `infra_error` with `errors: "runner did not write result file at deterministic path and did not emit RUNNER_RESULT_AT line"` and abort.
 
-Read the file at the resolved path. Parse as JSON. Extract `result`, `verdict`, `review_file`, `gemini_session_id`, `errors`, `user_warning`, `archived_stdout`, `archived_stderr`.
+Read the file at the resolved path. Parse as JSON. Extract `result`, `verdict`, `review_file`, `agy_conversation_id`, `errors`, `user_warning`, `archived_stdout`, `archived_stderr`.
 
 **If `user_warning` is non-null, surface it as a SEPARATE short user-visible message BEFORE the Step 5 verbatim-review message.** Format:
 
@@ -404,19 +402,19 @@ Dispatch based on `result`:
 
 | `result` value | Main thread action |
 |---|---|
-| `success` | Save `gemini_session_id` (keep prior if `null` per §2.4.4). Surface `user_warning` if set. Proceed to Step 5. |
+| `success` | Save `agy_conversation_id` (keep prior if `null` per §2.4.4). Surface `user_warning` if set. Proceed to Step 5. |
 | `timeout` | **TERMINAL — do NOT re-dispatch.** Runner already attempted twice internally (R4.1 + R5 retry = 2 × 10min). Tell user: "Reviewer timed out after two attempts (20 minutes total)." Abort the skill. User can re-invoke `/adversarial-review` to start a fresh review. |
 | `launch_failure` | **TERMINAL — do NOT re-dispatch.** The runner already retried once internally (Step R5). Show `errors` to user, abort the skill. This keeps the total-attempts-per-round invariant at 2 (matches pre-refactor: 1 initial + 1 retry). |
 | `infra_error` | Show `errors` to user (infrastructure: /tmp not writable, stderr file missing, RUNNER_RESULT_AT line absent). Abort. |
 | `input_error` | Bug in orchestration. Show `errors` to user. Abort. |
 
-**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the full retry budget (≤2 attempts per dispatch, internal) regardless of failure type. Total Gemini invocations per round ≤ 2.
+**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the full retry budget (≤2 attempts per dispatch, internal) regardless of failure type. Total Antigravity invocations per round ≤ 2.
 
-> **CRITICAL — main thread does NOT read stdout/stderr/JSONL/rollout files BY CONTENT.** Those live and die inside the subagent. Main reads: the runner result JSON at `RESULT_PATH`, the review file at `review_file`, and nothing else from `/tmp/gemini-*`. Archival `mv` (on resume failure) is done by the runner, not main — main never references `/tmp/gemini-stdout-*` or `/tmp/gemini-stderr-*` in any Bash argv.
+> **CRITICAL — main thread does NOT read stdout/stderr/JSONL/rollout files BY CONTENT.** Those live and die inside the subagent. Main reads: the runner result JSON at `RESULT_PATH`, the review file at `review_file`, and nothing else from `/tmp/agy-*`. Archival `mv` (on resume failure) is done by the runner, not main — main never references `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` in any Bash argv.
 
 ### Step 5: Read the review, show it, then check the verdict
 
-**1. Read the review file.** Read `/tmp/gemini-review-${REVIEW_ID}.md`.
+**1. Read the review file.** Read `/tmp/agy-review-${REVIEW_ID}.md`.
 
 **2. Semantic sanity checks.** The file MUST pass all of these:
 
@@ -426,7 +424,7 @@ Dispatch based on `result`:
 
 If any check fails → this is a **launch failure** (model produced no actionable review):
 
-- Show the user the `/tmp/gemini-stderr-${REVIEW_ID}.txt` contents (if any) AND the raw review file.
+- Show the user the `/tmp/agy-stderr-${REVIEW_ID}.txt` contents (if any) AND the raw review file.
 - Offer ONE retry of Step 4 (re-launch the same round). Retry does NOT consume the round counter — the round counter advances only when a valid review is produced.
 - Track the retry counter in your **current round's** reasoning only. The counter resets at the start of every new round.
 - After a failed retry → hard abort the skill. Do NOT route to the Step 7 fresh-exec fallback (that path is for resume failures in rounds 2+, and depends on prior-round content).
@@ -442,9 +440,9 @@ If any check fails → this is a **launch failure** (model produced no actionabl
 Message format:
 
 ```
-## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: gemini-3.6-flash)
+## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: gemini-3.7-flash)
 
-<verbatim contents of /tmp/gemini-review-${REVIEW_ID}.md>
+<verbatim contents of /tmp/agy-review-${REVIEW_ID}.md>
 ```
 
 **4. Only AFTER the review message has been sent** — parse the VERDICT line and dispatch:
@@ -475,13 +473,13 @@ Based on the reviewer's findings:
 
 **Skip** a fix if it contradicts the user's explicit requirements — note this for the user.
 
-### Step 7: Resubmit to Gemini (Rounds 2-5)
+### Step 7: Resubmit to Antigravity (agy) (Rounds 2-5)
 
-**Resume is the primary path.** Saves tokens and preserves session context. A fresh Gemini execution without resume is an **emergency fallback** when resume itself fails.
+**Resume is the primary path.** Saves tokens and preserves session context. A fresh Antigravity execution without resume is an **emergency fallback** when resume itself fails.
 
 **Step 7.1: Write the resume prompt body to disk.**
 
-Write `/tmp/gemini-resume-body-${REVIEW_ID}.md` containing:
+Write `/tmp/agy-resume-body-${REVIEW_ID}.md` containing:
 
 ```
 I've revised based on your feedback.
@@ -507,11 +505,10 @@ Same Agent tool invocation as Step 4 (bootstrap instruction with `${RUNNER_SPEC_
 REVIEW_ID: <same as initial round>
 REPO_ROOT: <same>
 OPERATION: resume
-GEMINI_MODEL: <same>
-GEMINI_REASONING: <same>
-PROMPT_BODY_PATH: /tmp/gemini-resume-body-<REVIEW_ID>.md
-RESULT_PATH: /tmp/gemini-runner-result-<REVIEW_ID>.json
-GEMINI_SESSION_ID: <uuid from previous round's runner result>
+AGY_MODEL: <same>
+PROMPT_BODY_PATH: /tmp/agy-resume-body-<REVIEW_ID>.md
+RESULT_PATH: /tmp/agy-runner-result-<REVIEW_ID>.json
+AGY_CONVERSATION_ID: <uuid from previous round's runner result>
 ---
 ```
 
@@ -522,12 +519,12 @@ Extract `RUNNER_RESULT_AT:` line (same tolerant regex + Glob fallback as Step 4)
 | `result` value | Main thread action |
 |---|---|
 | `success`, verdict `APPROVED` | Read `review_file`, go to Step 5 (it will dispatch to Step 8 on APPROVED). |
-| `success`, verdict `REVISE` | Save new `gemini_session_id`. If the subagent returned null (zero-find resume), keep the prior id per §2.4.4 — `user_warning` will already have been surfaced. Go to Step 5. |
+| `success`, verdict `REVISE` | Save new `agy_conversation_id`. If the subagent returned null (zero-find resume), keep the prior id per §2.4.4 — `user_warning` will already have been surfaced. Go to Step 5. |
 | `timeout` | **TERMINAL for this round** — runner already attempted twice. Route to fallback below. (Fresh-exec is a NEW round from the 5-round counter — its own ≤2-attempts budget applies.) No user-offered retry; that would compound. |
 | `launch_failure` | **TERMINAL for this round** — runner already retried once internally. Route to fallback below (runner already archived stdout/stderr to `-failed-resume.*` — paths in `archived_stdout` / `archived_stderr`). |
 | `infra_error` | Show `errors` to user, abort. |
 
-**Round-level attempt invariant:** exactly ONE runner dispatch per resume round. Every failure result routes to fallback (not re-dispatch within the same round). Fallback's fresh-exec dispatch consumes a NEW round from the 5-round counter, which has its own independent 2-attempts-per-round budget. Total Gemini invocations per round ≤ 2 regardless of failure type.
+**Round-level attempt invariant:** exactly ONE runner dispatch per resume round. Every failure result routes to fallback (not re-dispatch within the same round). Fallback's fresh-exec dispatch consumes a NEW round from the 5-round counter, which has its own independent 2-attempts-per-round budget. Total Antigravity invocations per round ≤ 2 regardless of failure type.
 
 **Step 7.4: Fallback chain** — triggered by `launch_failure` or repeated `timeout` from the runner.
 
@@ -540,7 +537,7 @@ Resume failed — the reviewer's re-review did not produce a usable result.
 Last round's maximum severity: <level>.
 
 Options:
-(a) Run a fresh Gemini execution with full previous-rounds context (higher token cost, new session)
+(a) Run a fresh Antigravity execution with full previous-rounds context (higher token cost, new session)
 (b) Conclude the review — show current findings as NOT VERIFIED
 ```
 
@@ -548,9 +545,9 @@ Options:
 - Max severity `critical` or `high` → fresh exec automatically.
 - Max severity `medium` only → Step 8 with the not-verified terminal state.
 
-*Fresh-exec dispatch:* build a new PROMPT_BODY that is the original Step 4 prompt for the current mode, followed by sections `## Previous review rounds` (verbatim round-1..N reviews + fixes from conversation history) and `## Current state of the artifact`. Write to `/tmp/gemini-body-${REVIEW_ID}.md` (overwriting the original).
+*Fresh-exec dispatch:* build a new PROMPT_BODY that is the original Step 4 prompt for the current mode, followed by sections `## Previous review rounds` (verbatim round-1..N reviews + fixes from conversation history) and `## Current state of the artifact`. Write to `/tmp/agy-body-${REVIEW_ID}.md` (overwriting the original).
 
-**Archival note:** if the fallback was triggered by `launch_failure`, the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 — main does NOT need to `mv` anything. If triggered by repeated `timeout`, no archival happened (no second Gemini invocation produced useful diagnostics); main can proceed directly. Either way, main never touches `/tmp/gemini-stdout-*` or `/tmp/gemini-stderr-*` itself.
+**Archival note:** if the fallback was triggered by `launch_failure`, the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 — main does NOT need to `mv` anything. If triggered by repeated `timeout`, no archival happened (no second Antigravity invocation produced useful diagnostics); main can proceed directly. Either way, main never touches `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` itself.
 
 Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new PROMPT_BODY_PATH pointing at the rebuilt prompt). The fresh-exec consumes one round from the 5-round counter. Return to Step 5 with the new review.
 
@@ -558,7 +555,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Approved:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.6-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
 
 **Status:** Approved after N round(s)
 
@@ -570,7 +567,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Maximum rounds reached:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.6-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
 
 **Status:** Maximum reached (5 rounds) — not fully approved
 
@@ -583,7 +580,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Not verified** (resume failed and the operator chose to conclude, or headless with only medium severity):
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.6-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
 
 **Status:** NOT VERIFIED — fixes applied, reviewer did not re-verify
 
@@ -613,16 +610,16 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 **Outside Plan Mode, on a cleanup-eligible terminal state:**
 
 ```bash
-rm -f /tmp/gemini-plan-${REVIEW_ID}.md \
-      /tmp/gemini-prompt-${REVIEW_ID}.md \
-      /tmp/gemini-resume-prompt-${REVIEW_ID}.md \
-      /tmp/gemini-review-${REVIEW_ID}.md \
-      /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-      /tmp/gemini-stderr-${REVIEW_ID}.txt \
-      /tmp/gemini-stdout-${REVIEW_ID}-failed-resume.jsonl \
-      /tmp/gemini-stderr-${REVIEW_ID}-failed-resume.txt \
-      /tmp/gemini-body-${REVIEW_ID}.md \
-      /tmp/gemini-runner-result-${REVIEW_ID}.json
+rm -f /tmp/agy-plan-${REVIEW_ID}.md \
+      /tmp/agy-prompt-${REVIEW_ID}.md \
+      /tmp/agy-resume-prompt-${REVIEW_ID}.md \
+      /tmp/agy-review-${REVIEW_ID}.md \
+      /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+      /tmp/agy-stderr-${REVIEW_ID}.txt \
+      /tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl \
+      /tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt \
+      /tmp/agy-body-${REVIEW_ID}.md \
+      /tmp/agy-runner-result-${REVIEW_ID}.json
 ```
 
 If the user declined `rm` — continue without error.
@@ -637,18 +634,18 @@ Do NOT delete plan files that existed before the review (only temp files created
 - With explicit `plan` argument or in Codex Plan Mode: skip git checks and base branch detection.
 - **`REPO_ROOT` is captured at Step 2** and passed as an absolute literal to every runner dispatch.
 - **`RUNNER_SPEC_PATH` is resolved at Step 4** (once per review) with priority: (1) `~/.codex/skills/adversarial-review/references/runner.md` (user-scoped install), (2) Glob `~/.codex/plugins/cache/**/skills/adversarial-review/references/runner.md` and take first hit (plugin-marketplace install), (3) `$(git rev-parse --show-toplevel)/references/runner.md` (dev checkout), (4) abort with installation error. Main never attempts to read system prompt / skill-invocation headers.
-- **Gemini reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, two-tier session-id capture with positive content-bind, ONE internal retry on ANY failure type (launch_failure, timeout, stderr-infra), archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
-- **Two-channel result protocol.** Runner writes structured JSON to `/tmp/gemini-runner-result-${REVIEW_ID}.json` (authoritative) AND returns a single `RUNNER_RESULT_AT: <path>` line as its final message. Main extracts the path via regex, reads the JSON, and never relies on raw-JSON-in-message parsing.
-- **Main thread reads only**: the runner result JSON at `RESULT_PATH` and the review file at `review_file`. Main does NOT Read `references/runner.md` — the runner spec is passed by path to the subagent, which Reads it itself. No other `/tmp/gemini-*` reads.
+- **Antigravity reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, two-tier session-id capture with positive content-bind, ONE internal retry on ANY failure type (launch_failure, timeout, stderr-infra), archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
+- **Two-channel result protocol.** Runner writes structured JSON to `/tmp/agy-runner-result-${REVIEW_ID}.json` (authoritative) AND returns a single `RUNNER_RESULT_AT: <path>` line as its final message. Main extracts the path via regex, reads the JSON, and never relies on raw-JSON-in-message parsing.
+- **Main thread reads only**: the runner result JSON at `RESULT_PATH` and the review file at `review_file`. Main does NOT Read `references/runner.md` — the runner spec is passed by path to the subagent, which Reads it itself. No other `/tmp/agy-*` reads.
 - **Runner is dispatched via Agent tool** with `subagent_type: general-purpose`. Agent tool call is synchronous (not `run_in_background`).
-- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. Main does NOT re-dispatch and does NOT offer the user a retry. Total Gemini invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
+- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
 - **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic.
-- **`GEMINI_MODEL` / `GEMINI_REASONING`** in the runner input schema refer to the model Gemini CLI launches (`gemini-3.6-flash`, effort `xhigh`).
+- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-3.7-flash`).
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
-- **Step 9 cleanup `rm` glob** covers `/tmp/gemini-plan-${REVIEW_ID}.md`, `/tmp/gemini-prompt-${REVIEW_ID}.md`, `/tmp/gemini-resume-prompt-${REVIEW_ID}.md`, `/tmp/gemini-review-${REVIEW_ID}.md`, `/tmp/gemini-stdout-${REVIEW_ID}.jsonl`, `/tmp/gemini-stderr-${REVIEW_ID}.txt`, `/tmp/gemini-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/gemini-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/gemini-body-${REVIEW_ID}.md`, and `/tmp/gemini-runner-result-${REVIEW_ID}.json`.
+- **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.
 - Cleanup is **conditional on terminal state**: remove temp files on approved/max-reached/not-verified; LEAVE them on abort (diagnostic value). Skip all cleanup in Plan Mode.
-- Always read-only sandbox — reviewer never writes files.
+- Always launch agy with `--mode plan`; reviewer prompts explicitly prohibit file changes. Runner also passes `--dangerously-skip-permissions` because headless agy cannot prompt for the commands needed to inspect the repository. Do NOT add agy's `--sandbox` flag on 1.1.12: repeated dogfood runs ended with `status=ERROR` and `connecting to sandbox server ... connection reset by peer` after repository commands.
 - Maximum 5 rounds to protect against infinite loops.
 - Show the user reviews and fixes for each round.
-- If Gemini CLI is not installed — tell the user to install Gemini CLI (`gemini`).
+- If Antigravity CLI (agy) is not installed — tell the user to install Antigravity CLI (agy) (`agy`).
 - If a fix contradicts the user's explicit requirements — skip and explain why.

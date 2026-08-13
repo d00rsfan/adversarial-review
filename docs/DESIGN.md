@@ -13,14 +13,14 @@ understand *why it does it that way* before changing something.
 
 ### Why this file exists
 
-The skill orchestrates two AI systems (OpenAI Codex as the lead/master, Google Gemini
+The skill orchestrates two AI systems (OpenAI Codex as the lead/master, Antigravity CLI (agy)
 as the external reviewer) through a CLI subprocess interface. The
 observable behavior of the skill depends on details of the Codex CLI
 (stream splitting, exit codes, flag support), on details of the
-Codex harness (Bash-tool output size, Opus interpretation of
+Codex harness (tool output size, model interpretation of
 instructions), and on a set of trade-offs between token cost,
 robustness, and operator ergonomics. Those details drift with each new
-Codex release and each new Claude model version. A maintainer reading
+Codex release and each new Codex model version. A maintainer reading
 only `SKILL.md` sees the instructions but not which facts are
 load-bearing and which are historical accidents — and so may undo a
 subtle fix during a refactor.
@@ -33,11 +33,11 @@ terrain.
 
 ### Audiences
 
-1. **A future Claude** resuming work on the skill in a fresh session.
-   It knows Claude Code in general but has no memory of the discussion
+1. **A future Codex agent** resuming work on the skill in a fresh session.
+   It knows Codex in general but has no memory of the discussion
    that produced the current design.
 2. **A human developer** who knows git and bash but does not know the
-   Claude Code internals or the Codex CLI quirks.
+   Codex internals or the Antigravity CLI quirks.
 3. **A contributor** who wants to add a feature (new reviewer backend,
    CI integration) and needs to know what invariants to preserve.
 
@@ -55,9 +55,9 @@ If you are about to modify the skill:
 1. Skim `§1. System context` to recall the flow.
 2. Find the step you want to change in `§4. Design decisions` — each
    decision lists which `SKILL.md` step it ties into.
-3. Check `§2. Codex CLI empirical facts` for the environment
+3. Check `§2. Antigravity CLI empirical facts` for the environment
    assumptions you are about to lean on. If the date in `§8. Version
-   and verification log` is older than a few Codex releases, re-verify
+   and verification log` is older than a few agy releases, re-verify
    before trusting.
 4. Run `§7. Smoke test protocol` before and after your change. If the
    before-run already fails, stop and investigate — don't layer a
@@ -72,10 +72,10 @@ If you are about to modify the skill:
 `adversarial-review` is a Codex skill. The user types
 `/adversarial-review` in a Codex session; Codex (the "lead/master")
 writes an adversarial review prompt to a temp file, launches
-`gemini` as a subprocess with the prompt on stdin, and captures the
-reviewer's response to a `-o` file. Claude then shows the review to the
+`agy --print` with that file's contents as one prompt argument, and
+extracts `.response` from the JSON result. Codex then shows the review to the
 user verbatim, applies fixes to the plan or code, and re-submits the
-revised state to the reviewer through `gemini resume`. The loop
+revised state to the reviewer through `agy --conversation <UUID>`. The loop
 runs up to five rounds, or until the reviewer emits
 `VERDICT: APPROVED`.
 
@@ -83,17 +83,18 @@ runs up to five rounds, or until the reviewer emits
 
 - **Lead (Codex).** Orchestrator. Reads `SKILL.md`, runs the Bash /
   Write / Read / Edit tools, authors the fixes, decides when to stop.
-- **Reviewer (Gemini 3.6 Flash xhigh).** External AI process invoked per round. Receives
-  the adversarial prompt, reads repo/plan content in a read-only
-  sandbox, emits a structured review with `VERDICT:`.
-- **User.** Reads the verbatim review Claude shows each round,
+- **Reviewer (Antigravity, `gemini-3.7-flash`, effort high).** External AI process invoked per round. Receives
+  the adversarial prompt, reads repo/plan content in agy plan mode,
+  and emits a structured review with `VERDICT:`. See §9.7 for the
+  headless-permissions and sandbox trade-off in agy 1.1.12.
+- **User.** Reads the verbatim review Codex shows each round,
   accepts/rejects the skill's final result.
 
 ### Flow
 
 ```mermaid
 flowchart TD
-    A[launch: gemini --json] --> B{checks: exit, stderr, review file}
+    A[launch: agy --output-format json] --> B{checks: exit, stderr, review file}
     B -- fail --> RETRY{retry budget}
     RETRY -- yes --> A
     RETRY -- no --> ABORT([abort, leave temp files])
@@ -102,13 +103,13 @@ flowchart TD
     V -- APPROVED --> APPROVED([Step 8: approved])
     V -- max rounds --> MAX([Step 8: max reached])
     V -- REVISE --> FIX[apply fixes]
-    FIX --> RESUME[resume: gemini resume --json]
+    FIX --> RESUME[resume: agy --conversation UUID]
     RESUME --> C{checks: exit, stderr, review file}
     C -- ok --> SHOW
     C -- fail --> FB{fallback}
     FB -- interactive --> ASK[ask user: fresh exec or conclude]
     FB -- headless --> SEV{max severity}
-    ASK -- fresh --> FRESH[fresh gemini + conv history]
+    ASK -- fresh --> FRESH[fresh agy + conv history]
     ASK -- conclude --> NOTVER([Step 8: NOT VERIFIED])
     SEV -- critical/high --> FRESH
     SEV -- medium only --> NOTVER
@@ -122,254 +123,161 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(Google Gemini 3.6 Flash (effort xhigh) via Gemini CLI) reduces shared blind spots. The cost is an external
+(Antigravity CLI with `gemini-3.7-flash`, effort high) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage.
 
 ---
 
-## §2. Codex CLI empirical facts (verified on v0.121.0)
+## §2. Antigravity CLI empirical facts (verified on v1.1.12)
 
-All facts in this section were verified on `codex-cli 0.121.0` on
-2026-04-17 (see `§8. Version and verification log`). If you are reading
-this more than a few Codex releases later, re-verify before relying on
-a specific behavior. `§7. Smoke test protocol` is a minimal suite you
-can run in a few minutes.
+The current contract was verified on `agy 1.1.12` on 2026-08-13 (see
+`§8. Version and verification log`). The prior text in this section was
+mechanically inherited from Codex CLI 0.121.0 during the agy migration;
+those Codex-specific flags and stream semantics were never valid agy facts.
+Re-run `§7` after upgrading agy.
 
 ### §2.1. Invocation shapes
 
-Two relevant subcommands:
-
-```
-gemini [OPTIONS] [PROMPT]
-gemini resume [OPTIONS] [SESSION_ID] [PROMPT]
-```
-
-Both accept PROMPT either as a trailing argument or as stdin. Two stdin
-shapes are accepted by codex itself:
+Headless mode requires the prompt as an argument to `-p` / `--print`:
 
 ```bash
-# A. stdin redirect from file
-gemini ... - < /tmp/gemini-prompt-*.md
-
-# B. pipe through cat
-cat /tmp/gemini-prompt-*.md | gemini ... -
+agy -p "PROMPT" [OPTIONS]
+agy -p "PROMPT" --conversation UUID [OPTIONS]  # explicit resume
+agy -p "PROMPT" --continue [OPTIONS]           # newest conversation
 ```
 
-**Both shapes work in some environments; only (B) works reliably in all
-observed Claude Code sandboxes.** In at least one sandbox configuration,
-form (A) exits 1 with empty stderr (no codex error message) while form
-(B) produces an identical `-o` review file. We do not have a root-cause
-diagnosis for (A)'s failure — it is consistent across codex 0.120.0 and
-0.121.0 in the affected environment, so it is not a codex version issue.
-See `§6.6` for the observation log.
+**Superseded migration assumption:** ~~`cat prompt.md | agy --print -`
+feeds stdin to agy.~~ In agy 1.1.12 the positional `-` is not a stdin
+sentinel. The command can exit 0 while ignoring the file and returning a
+generic greeting. This is the exact failure reported under review id
+`1786638300-60419327`.
 
-The skill therefore uses form (B) as canonical (`§4.1` captures the
-decision). Long XML prompts still need file delivery to avoid shell
-quoting issues, so the file is written via the Write tool and fed
-through `cat | ... -` rather than embedded as a command-line argument.
+The skill keeps the prompt in a file for marker binding and diagnostics,
+then passes it as one argument:
+
+```bash
+agy --print "$(cat /tmp/agy-prompt-*.md)" ...
+```
+
+Quoted command substitution is safe for XML/Markdown prompt text: expansion
+produces one argv element and is not re-evaluated as shell syntax. It strips
+trailing newlines only, which does not change the prompt contract. Extremely
+large prompts remain bounded by the platform's argv-size limit; agy 1.1.12
+exposes no prompt-file flag.
 
 ### §2.2. Output streams
 
-Two output modes, with different stream semantics:
+With `--output-format json`, stdout is one JSON object, not an event stream:
 
-**Default mode (no `--json`):**
-
-- stdout: only the final agent message, plain text. Identical to what
-  `-o FILE` writes to disk.
-- stderr: a metadata block printed before the agent response, followed
-  by a tail including token usage. The metadata block includes the
-  line `session id: <uuid>`.
-
-Verify:
-
-```bash
-echo "respond PONG" | gemini --model gemini-3.6-flash -s read-only \
-  -C "$(git rev-parse --show-toplevel)" - > /tmp/a.out 2> /tmp/a.err
-cat /tmp/a.err | grep 'session id:'
-cat /tmp/a.out
+```json
+{
+  "conversation_id": "<uuid>",
+  "status": "SUCCESS",
+  "response": "<final reviewer text>",
+  "duration_seconds": 3.7,
+  "num_turns": 1,
+  "usage": {}
+}
 ```
 
-**JSON mode (`--json`):**
+Stderr is empty on a clean run and carries CLI diagnostics on failure. The
+runner stores the object in `/tmp/agy-stdout-${REVIEW_ID}.jsonl`; the `.jsonl`
+suffix is retained for compatibility with existing cleanup and archive paths,
+although the file contains a single JSON value. A separate Python extraction
+writes `.response` to `/tmp/agy-review-${REVIEW_ID}.md`.
 
-- stdout: newline-delimited JSONL events. The first event is always
-  `{"type":"thread.started","thread_id":"<uuid>", ...}`. Subsequent
-  events are `turn.started`, `item.completed`, `turn.completed`, etc.
-- stderr: empty on success. Populated only on errors.
-
-Verify:
-
-```bash
-echo "respond PONG" | gemini --json --model gemini-3.6-flash -s read-only \
-  -C "$(git rev-parse --show-toplevel)" - > /tmp/a.out 2> /tmp/a.err
-head -1 /tmp/a.out  # expect {"type":"thread.started",...}
-wc -c /tmp/a.err    # expect 0
-```
-
-**Environment-specific suppression.** In at least one observed Claude
-Code sandbox, `--json` stdout is empty (0 bytes) when redirected to a
-file, even though the `-o` path is populated correctly and the process
-exits 0. The `-o` file has the review, stderr is empty, only stdout
-JSONL is missing. This is reproducible across codex 0.120.0 and 0.121.0
-in that environment and not reproducible in the reference environment.
-Root cause is not diagnosed; see `§6.6` for the observation log. The
-skill handles it with a secondary filesystem-based session-id capture
-path (`§4.1b`) so resume still works.
-
-**`-o FILE` flag:**
-
-Writes the final agent message to FILE as plain text, *regardless* of
-whether `--json` is set. In JSON mode, this is the only way to get a
-human-readable review — stdout is machine-readable events only.
+**Superseded migration assumptions:** ~~`--json` emits `thread.started`
+JSONL events~~ and ~~`-o FILE` stores the final response.~~ Those were Codex
+CLI behaviors. agy uses `--output-format json`, the field is
+`conversation_id`, and the runner performs the review-file extraction.
 
 ### §2.3. Session persistence
 
-Every non-ephemeral `gemini` run creates a rollout file:
+agy persists a conversation transcript at:
 
 ```
-~/.gemini/sessions/YYYY/MM/DD/rollout-TIMESTAMP-UUID.jsonl
+~/.gemini/antigravity-cli/brain/<UUID>/.system_generated/logs/transcript_full.jsonl
 ```
 
-Filename format: `rollout-<ISO-8601 timestamp with dashes>-<UUID>.jsonl`.
-The UUID is the session / thread id and is accepted verbatim by
-`gemini resume`.
-
-`--ephemeral` disables persistence. Not used by the skill — resume
-requires persistence.
-
-**Session-id recovery from the filesystem.** Because the UUID is a
-deterministic suffix of the filename, session id can be recovered from
-disk after the fact, independent of whether `--json` emitted the
-`thread.started` event to stdout. The rollout JSONL body also contains
-the initial prompt text — so the skill can positively bind by putting
-a unique marker in the prompt (`REVIEW_ID`) and grepping for it
-across candidate rollouts, rather than relying on timing alone. The
-skill uses this as a secondary capture path (`§4.1b`) when stdout is
-empty.
-
-Verify:
+The directory name is the conversation id accepted by `--conversation`.
+The transcript contains the original prompt, including the attempt-scoped
+`ADVERSARIAL-REVIEW-SESSION` marker. The runner therefore retains its
+positive content-bound filesystem fallback:
 
 ```bash
-MARKER="PROBE-$(date +%s)-$$"
-cat > /tmp/x-prompt.md <<EOF
-<!-- ${MARKER} -->
-respond PONG
-EOF
-cat /tmp/x-prompt.md | gemini --model gemini-3.6-flash -s read-only \
-  --skip-git-repo-check -o /tmp/x.md - >/dev/null 2>&1
-ROLLOUT=$(find ~/.gemini/sessions -name 'rollout-*.jsonl' \
-  -newer /tmp/x-prompt.md \
-  -exec grep -l "${MARKER}" {} + 2>/dev/null | head -1)
-basename "${ROLLOUT}" .jsonl \
-  | grep -oE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}'
-# expect: a UUID, and that UUID accepted by `gemini resume`
-rm -f /tmp/x-prompt.md /tmp/x.md
+find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' \
+  -newer /tmp/agy-prompt-${REVIEW_ID}.md \
+  -exec grep -l "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" {} +
 ```
+
+Exactly one match is required. The UUID is the first path component below
+`brain/`; zero or multiple matches fail closed as defined in `§4.1`.
 
 ### §2.4. Resume semantics
 
-```
-gemini resume [OPTIONS] [SESSION_ID] [PROMPT]
-gemini resume --last  # pick newest in cwd
-```
+Use `--conversation UUID` to resume a specific reviewer conversation. Use
+`--continue` only to select the newest conversation for the workspace; the
+skill never does this because unrelated parallel agy work could be selected.
+Do not combine the two flags.
 
-**Supported flags (per `gemini resume --help`):** `--json`, `-o`,
-`-m`, `-i`, `--last`, `--all`.
+**§2.4.1. `--continue` is implicit selection.** The CLI chooses a recent
+conversation rather than binding the command to the id captured by this
+review. That is sufficient reason to exclude it from the skill, independent
+of any cwd filtering details.
 
-**NOT supported:** `-s` (sandbox inherited from original session; always
-`read-only` in this skill), `-C` / `--cd` (cwd is whatever the shell
-had when `codex` was invoked — see §2.4.2).
+**§2.4.2. cwd comes from the process.** agy 1.1.12 has no `-C` / `--cd`
+flag. The runner prefixes initial, fresh-exec, and explicit-resume launches
+with `cd "${REPO_ROOT}" &&` so all rounds inspect the same repository.
 
-**§2.4.1. `--last` filters by cwd.** `resume --last` only considers
-sessions whose rollout records the current cwd. Invoking from one repo
-cannot pick up a session in another repo. But within the same cwd, it
-picks the *newest* session regardless of origin — including one-shots,
-unrelated tool invocations, or user-initiated codex work happening in
-parallel.
+**§2.4.3. Bad UUID silently creates a conversation.** On 1.1.12 a nonexistent
+id passed through `--conversation` writes `warning: conversation "..." not
+found` to stderr, exits **0**, and returns `SUCCESS` with a new
+`conversation_id`. The runner therefore rejects the warning and independently
+requires every resume result id (primary or transcript fallback) to equal the
+requested id. A valid verdict does not override this equality check.
 
-Verify:
-
-```bash
-mkdir -p /tmp/cwd-a /tmp/cwd-b
-cd /tmp/cwd-a && git init -q
-cd /tmp/cwd-b && git init -q
-cd /tmp/cwd-a && echo "respond ALPHA" | gemini -s read-only \
-  --skip-git-repo-check - 2>&1 | grep 'session id:'
-cd /tmp/cwd-b && echo "respond BRAVO" | gemini -s read-only \
-  --skip-git-repo-check - 2>&1 | grep 'session id:'
-cd /tmp/cwd-a && echo "which?" | gemini resume --last \
-  --skip-git-repo-check - 2>&1 | tail -5
-# expect: resumes ALPHA session, not BRAVO
-```
-
-**§2.4.2. cwd is inherited from the shell, not the rollout.** The
-original `gemini -C /repo ...` pins the session to `/repo` for its
-initial turn. A subsequent `gemini resume <UUID>` from a *different*
-cwd does NOT inherit `/repo`. It either fails with
-`Not inside a trusted directory` (exit 1, no `-o` written), or silently
-runs with the new cwd. The skill works around this with `cd '<REPO_ROOT>' &&`
-as a command prefix before every resume (see `§4.3`).
-
-**§2.4.3. Bad UUID exit code.** `gemini resume <non-existent-uuid>`
-exits with code **1** (not 0). stderr contains:
-
-```
-Error: thread/resume: thread/resume failed: no rollout found for thread id <uuid>
-```
-
-stdout is empty. `-o` file is NOT created.
-
-Verify:
-
-```bash
-echo "hi" | gemini resume 00000000-0000-0000-0000-000000000000 \
-  --skip-git-repo-check - 2>/tmp/e.err
-echo "EXIT=$?"           # expect EXIT=1
-cat /tmp/e.err           # expect "thread/resume failed..." line
-```
-
-**§2.4.4. Thread ID does not rotate across successful resumes.** Each
-successful `gemini resume --json` emits a `thread.started` event
-whose `thread_id` equals the original session's UUID. It is *not* a new
-id. The skill's rule "update `CODEX_SESSION_ID` on every successful
-resume" therefore is functionally a no-op on the current version, but
-remains defensive for future Codex versions that might rotate ids.
-
-Verify: compare the UUID in the first `thread.started` event of an
-initial `gemini --json` with the UUID in the first `thread.started`
-event of `gemini resume --json <that-UUID>`. Should be identical.
+**§2.4.4. Conversation ID remains stable across resume.** On 1.1.12 an
+initial headless call and a successful `--conversation <that-id>` call both
+return the same `conversation_id`. The runner still refreshes the value from
+every successful REVISE response so a future rotation cannot silently drift.
 
 ### §2.5. Known failure modes
 
-| Trigger | Exit code | stdout | stderr | `-o` file |
-|---|---|---|---|---|
-| Success (reference env) | 0 | final text / JSONL | empty (json) or metadata+token block (non-json) | written |
-| Success (affected sandbox, §6.6) | 0 | empty (`--json` suppressed) | empty | written |
-| Timeout (wrapped `timeout 600`) | 124 | partial or empty | partial | may be missing or partial |
-| Model not available (`-m bogus`) | 1 | empty | error line | not written |
-| `-o` path unwritable | 0 | final text / JSONL | `Failed to write last message file ...` line | not written |
-| Not in git work tree, no `--skip-git-repo-check` | 1 | empty | `Not inside a trusted directory ...` | not written |
-| Resume with bad UUID | 1 | empty | `thread/resume failed ...` | not written |
-| `- < file` stdin redirect (affected sandbox, §6.6) | 1 | empty | empty (!) | not written |
+| Trigger | Exit | stdout | stderr | Review extraction |
+|---|---:|---|---|---|
+| Success | 0 | one JSON object | empty | `.response` contains verdict |
+| Prompt piped with positional `-` | 0 observed | success JSON with generic greeting | empty | no verdict; rejected |
+| External timeout | 124 | partial or empty | partial or empty | rejected |
+| Invalid model/auth | non-zero or non-SUCCESS JSON | empty/error JSON | diagnostic possible | rejected |
+| Missing `--conversation` UUID | 0 observed | SUCCESS JSON with a new UUID | warning | rejected by warning/id equality |
+| Malformed JSON or empty response | may be 0 | malformed/empty | may be empty | empty review; rejected |
 
-The `-o` unwritable case is dangerous: exit code is misleading. The
-skill defends by always reading stderr even on exit 0 (see `§4.8`).
-The `- < file` exit-1-with-empty-stderr case is why the skill uses
-`cat | pipe` instead (see `§4.13`).
+The semantic verdict check remains mandatory even after exit 0 because the
+broken stdin invocation demonstrates that transport success is not prompt
+application success.
 
 ### §2.6. CLI gaps relevant to the skill
 
-- `gemini resume` does not accept `-C`.
-- `gemini resume` did not accept `-o` before issue openai/codex#12538
-  was resolved. On current versions it does.
-- `codex --version` prints `codex-cli 0.121.0` — not empty, despite one
-  earlier agent's diagnostic claim (see `§6`).
+- No prompt-file or documented stdin-prompt mode in agy 1.1.12.
+- No cwd flag; use an explicit `cd` prefix.
+- `--output-format json` is a single object; use `stream-json` only when an
+  event stream is actually wanted (the skill does not).
+- `--print-timeout` defaults to 5 minutes, so the runner sets `10m` to align
+  it with the outer `timeout 600` guard.
+- Reviewer intent is constrained with `--mode plan` and an explicit no-write
+  instruction in every review prompt.
+  `--dangerously-skip-permissions` is also required because headless agy cannot
+  prompt to approve `git diff` and other inspection commands; auto-approval is
+  therefore bounded by plan mode and the reviewer prompt. agy 1.1.12's
+  `--sandbox` is not used because repeated real-diff runs ended with
+  `status=ERROR` and a sandbox-server connection reset (§9.7).
 
 ---
 
-## §3. Claude Code / harness facts
+## §3. Codex harness facts
 
-These facts apply to the Claude Code runtime (the "harness") that
+These facts apply to the Codex runtime (the "harness") that
 executes the skill, verified during work on this refactor.
 
 ### §3.1. Bash tool
@@ -402,9 +310,9 @@ has explicitly granted a permission. The skill does not push, so this
 does not affect runtime, but it is relevant when releasing skill
 changes: maintainer must push master themselves or add a permission.
 
-### §3.4. Opus interpretation of instructions
+### §3.4. Model interpretation of instructions
 
-Later Opus releases tend to interpret SKILL.md instructions more
+Later model releases may interpret SKILL.md instructions more
 literally than earlier ones. An instruction like "Show the user
 verbatim" without a hard procedural anchor can be internally
 rationalized as "the context already contains the review, the user
@@ -412,9 +320,9 @@ sees the context" and skipped. Current design compensates with:
 
 - A strict "YOUR NEXT MESSAGE to the user must begin with ..." clause
   (`SKILL.md` Step 5) that names the message, not just the act.
-- Architectural enforcement: the `--json` invocation puts machine-
-  readable JSONL in stdout, so the review text exists only in the
-  `-o` file. The lead *cannot* satisfy the "show the review" contract
+- Architectural enforcement: `--output-format json` puts a machine-
+  readable object in stdout, and the runner extracts `.response` into
+  the review file. The lead *cannot* satisfy the "show the review" contract
   by quoting from the Bash result, because the Bash result has no
   review text in the first place.
 
@@ -433,117 +341,45 @@ Each decision below follows the same template:
 - **Chosen because** — the load-bearing argument.
 - **Trade-offs accepted** — what we gave up.
 
-### §4.1. Two-tier session ID capture (`--json` primary, attempt-scoped content-bind secondary)
+### §4.1. Two-tier conversation ID capture (`--output-format json` primary, attempt-scoped content-bind secondary)
 
-- **Decision.** Every `gemini` and `gemini resume` invocation
-  uses `--json` with stdout redirected to
-  `/tmp/gemini-stdout-${REVIEW_ID}.jsonl`. Every prompt (initial, retry,
-  resume, fresh-exec fallback) starts with a per-launch session marker
-  `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` as
-  its first line, where `${REVIEW_ID}` is review-stable and
-  `${ATTEMPT_ID}` is a fresh 6-digit random regenerated **per launch**.
-  Session ID capture then tries:
-  - **Primary** (`§4.1a`): parse `thread_id` from the first line of
-    JSONL stdout.
-  - **Secondary** (`§4.1b`): the rollout file that is both `-newer` than
-    the prompt file AND contains this launch's specific attempt marker
-    (grep), with UUID extracted from the filename:
-    ```
-    find ~/.gemini/sessions -name 'rollout-*.jsonl' \
-      -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
-      -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} +
-    ```
-    All flags (`-newer FILE`, `-exec CMD {} +`, `grep -l`) are POSIX —
-    works unchanged on Linux and macOS. Zero paths → **fail closed**
-    (the skill cannot safely pick an unrelated rollout). Two or more
-    paths → also **fail closed** (see "Trade-offs" for why this cannot
-    happen under correct attempt-scoping and why masking it would be
-    worse than aborting visibly).
-- **Where in SKILL.md.** Step 4 (launch), Step 7 (resume), Step 7 fresh-
-  exec fallback. All three sites use the same positive-binding pattern,
-  differing only in which prompt file anchors the `-newer` check.
-- **Context.** The primary path covers the reference environment
-  cleanly (JSONL events reliably land in the redirected file). In at
-  least one Claude Code sandbox the JSONL stdout is suppressed (0 bytes)
-  even on exit 0 with populated `-o` (`§2.2`, `§6.6`), and without a
-  secondary path the skill cannot resume — every round becomes a fresh
-  `gemini`, wasting tokens on project re-reads. An earlier iteration
-  of this secondary (mtime-only: newest rollout with mtime >
-  `CODEX_SESSIONS_BEFORE`) was rejected in Round 6 because it binds on
-  timing alone — parallel codex creates a newer rollout that is
-  silently picked. The next iteration (content-bind on `${REVIEW_ID}`
-  alone) was rejected in Round 7 because `REVIEW_ID` is review-stable:
-  a retry inside the same review can legitimately leave two rollouts
-  both matching the grep, and the skill then has to "pick one." The
-  current design attempt-scopes the marker: `${ATTEMPT_ID}` is fresh
-  per launch, so only THIS exact exec/retry/resume/fresh-exec run
-  matches. Everything else — parallel codex, stale retry, prior
-  attempts of the same review — is invisible to the grep.
+- **Decision.** Every agy launch writes its single JSON result to
+  `/tmp/agy-stdout-${REVIEW_ID}.jsonl`. Every prompt starts with
+  `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->`,
+  where `ATTEMPT_ID` is regenerated per launch. Capture then tries:
+  - **Primary:** parse the JSON object's `conversation_id`.
+  - **Secondary:** require exactly one `transcript_full.jsonl` that is
+    newer than the prompt file and contains this launch's full marker;
+    extract the UUID directory immediately below `brain/`.
+- **Where in SKILL.md.** Step 4, Step 7 resume, and Step 7 fresh-exec;
+  the mechanics are centralized in `references/runner.md` R4.4.
+- **Context.** The primary is agy's documented machine-readable result.
+  The secondary preserves fail-closed recovery if stdout is malformed or
+  lacks the field. Attempt scoping prevents a retry or parallel agy call
+  from silently binding the wrong conversation (`§6.7`, `§6.8`).
 - **Alternatives considered.**
-  - *Keep parsing `session id:` from stderr.* Rejected: Bash tool
-    truncates output at ~30 KB from the head (`§3.1`); long reasoning
-    traces pushed the session-id line out of the retained window.
-    (Historical reason for moving to `--json` in the first place.)
-  - *Redirect stderr to a file, Read via Read tool.* Rejected: since
-    `§4.1a` covers the reference env cleanly and `§4.1b` covers the
-    sandboxed env, adding a third path is not worth the complexity.
-  - *Newest-rollout-by-mtime (timestamp-only bind).* Rejected in
-    Round 6: parallel codex invocation race produces silent
-    wrong-session corruption (details in `§6.7`). Superseded by
-    positive content-bind.
-  - *Review-stable marker (`REVIEW_ID` alone, no per-launch nonce).*
-    Rejected in Round 7 (`§6.8`): SKILL.md explicitly allows one
-    retry per round on launch failure, so a first attempt and its
-    retry share the same REVIEW_ID; both rollouts match the grep;
-    the skill's fallback must "pick one" and can pick the stale
-    first attempt. Silent intra-review session drift. Attempt-scoped
-    marker (`REVIEW_ID-ATTEMPT_ID`) eliminates this because every
-    launch gets a fresh ATTEMPT_ID.
-  - *Write a dedicated marker file on disk (e.g.,
-    `/tmp/gemini-start-${REVIEW_ID}.marker`) and grep rollouts for that
-    file's path.* Rejected: adds another temp-file artifact to manage
-    and clean up. The prompt file is already written for the launch
-    and can serve as both the `-newer` anchor and (via embedded
-    marker) the grep target — no new file needed.
-  - *Embed `REVIEW_ID` as an XML element inside the prompt rather
-    than as an HTML comment.* Rejected: a prompt-level XML element
-    could interfere with the reviewer's parsing or be surfaced in
-    the reviewer's response as if it were content to address. An
-    HTML-style comment at the top is unambiguous metadata to any
-    reader and survives intact in the rollout JSONL where grep sees
-    it.
-  - *Drop `--json` entirely and use plain-text stdout.* Rejected:
-    `--json` makes stdout machine-readable only, which is *load-
-    bearing* for the show-review gate (`§4.9`). Plain-text stdout
-    would re-expose the "Opus sees the review in Bash result, skips
-    the user-visible show step" failure mode.
-- **Chosen because.** Primary is cheap and documented on the Codex side
-  (the `thread.started` event is in the CLI contract). Secondary is
-  positively-bound: zero ambiguity between our rollout and any other.
-  Together they cover both observed environments without a silent-
-  corruption risk from parallel codex.
-- **Trade-offs accepted.**
-  - Human-readable review is no longer in stdout (it went to `-o`
-    only) — load-bearing for `§4.9`.
-  - Every prompt now has a leading HTML-comment line. Reviewer sees
-    it but ignores (Codex treats it as non-instructional content).
-  - Session-id capture happens only after review-file sanity passes
-    AND only when verdict is `REVISE` (Step 4 check order). This
-    avoids aborting a valid round-1 APPROVED over a secondary
-    failure: APPROVED means no resume, no session-id needed.
-  - Extra permission surface: `Bash(find ~/.gemini/sessions*)` in the
-    recommended permissions list.
+  - *Timestamp-only newest transcript.* Rejected: parallel-call race.
+  - *Review-stable marker only.* Rejected: first attempt and retry can
+    both match.
+  - *Dedicated marker file.* Rejected: the prompt file already provides
+    both the mtime anchor and embedded marker.
+  - *Plain-text stdout.* Rejected: loses structured `conversation_id` and
+    weakens the show-review boundary in `§4.9`.
+- **Chosen because.** The primary is direct and cheap; the secondary is
+  positively bound to this exact launch rather than inferred by timing.
+- **Trade-offs accepted.** Every prompt gets a leading comment; fallback
+  needs read access to the Antigravity brain directory. Capture is skipped
+  after APPROVED because no further resume is needed.
 
 ### §4.2. Capture `REPO_ROOT` at Step 2, substitute literally
 
 - **Decision.** At Step 2, run `git rev-parse --show-toplevel` once,
   save the absolute path as `REPO_ROOT`, and substitute it verbatim
-  (quoted) into every Codex command. Do not use `$(pwd)` in composed
+  (quoted) into every agy command. Do not use `$(pwd)` in composed
   commands.
 - **Where in SKILL.md.** Step 2 (capture), Steps 4 and 7 (use).
-- **Context.** Codex commands need a stable cwd: `-C` for initial exec,
-  `cd '...' &&` prefix for resume. If the cwd is evaluated at Bash-call
-  time via `$(pwd)`, it is susceptible to Claude Code's weak
+- **Context.** All reviewer launches need a stable cwd. If the cwd is evaluated at Bash-call
+  time via `$(pwd)`, it is susceptible to the harness's weak
   cwd-persistence between calls (§3.1).
 - **Alternatives considered.**
   - *`$(pwd)` everywhere.* Rejected: cwd drift.
@@ -554,60 +390,53 @@ Each decision below follows the same template:
   bare repos with a clear message and warns on submodules (see
   `SKILL.md` Step 2).
 
-### §4.3. Hybrid cwd pinning: `-C` for initial, `cd` prefix for resume
+### §4.3. Uniform cwd pinning with a `cd` prefix
 
-- **Decision.** Initial `gemini` uses `-C "${REPO_ROOT}"`. Resume
-  uses a shell prefix: `cd '${REPO_ROOT}' && gemini resume ...`.
-- **Where in SKILL.md.** Steps 4 and 7.
-- **Context.** Codex's `exec` accepts `-C`; `resume` does not. Resume
-  inherits cwd from the invoking shell.
-- **Alternatives considered.**
-  - *Use `cd` prefix for both.* Rejected: `-C` is more precise for
-    initial (it is the documented way to pin), and uses less
-    permissions surface.
-  - *Rely on the harness's ambient cwd.* Rejected: see §3.1 —
-    insufficiently reliable.
-- **Chosen because.** This is the minimal-surgery solution that matches
-  what each subcommand actually supports.
-- **Trade-offs accepted.** Two slightly different command shapes in
-  `SKILL.md`; one extra permission pattern in README
-  (`Bash(cd * && timeout 600 gemini resume *)`).
+- **Decision.** Prefix every initial, fresh-exec, and resume call with
+  `cd "${REPO_ROOT}" &&`; agy 1.1.12 has no cwd flag.
+- **Where in SKILL.md.** Steps 4 and 7 via runner R3.
+- **Context.** The runner's ambient cwd is not a stable API and all rounds
+  must inspect the same repository.
+- **Alternatives considered.** *Rely on ambient cwd.* Rejected: §3.1.
+- **Chosen because.** One command shape covers every operation and matches
+  the current CLI surface.
+- **Trade-offs accepted.** The repository path is inserted into shell
+  syntax, so Step 2 rejects unsafe path characters.
 
-### §4.4. Conditional `CODEX_SESSION_ID` update (only on full success)
+### §4.4. Conditional `AGY_CONVERSATION_ID` update (only on full success)
 
-- **Decision.** Update `CODEX_SESSION_ID` from the JSONL stdout's first
-  line only when ALL of the following hold: exit code 0, stderr has no
-  `Error:` or `thread/resume failed` line, `-o` file contains a valid
-  `VERDICT:` line (and, for REVISE, at least one `[severity:` marker).
+- **Decision.** Update `AGY_CONVERSATION_ID` only after exit 0, sane
+  stderr, a parseable response with a valid verdict, and (for REVISE)
+  successful primary or secondary id capture.
 - **Where in SKILL.md.** Step 7.
-- **Context.** A failed resume (bad model, model error, infrastructure
-  failure) still emits a `thread.started` event with a fresh but dead
-  `thread_id`. An unconditional update would poison the session id and
-  cause subsequent resumes to fail against a non-existent session.
+- **Context.** Transport success alone does not prove that agy applied the
+  prompt: the broken stdin form exited 0 with a generic greeting. An
+  unconditional update could bind later rounds to a non-review response.
 - **Alternatives considered.**
   - *Unconditional update.* Rejected: demonstrated poisoning on bad
     model invocations during review.
-  - *Update on exit 0 only.* Rejected: `-o` unwritable returns exit 0
-    with a broken session; stderr error line needs checking too.
+  - *Update on exit 0 only.* Rejected by the greeting-with-exit-0 incident.
 - **Chosen because.** All three checks together give a reliable "the
   session actually produced a review" signal.
 - **Trade-offs accepted.** More conditions to specify and execute, but
   they are already required for the review-file sanity check — marginal
   cost.
 
-### §4.5. No `--last` in any fallback
+### §4.5. No implicit `--continue` in any fallback
 
-- **Decision.** The fallback chain does not use `gemini resume --last`.
+- **Decision.** The fallback chain uses only explicit
+  `--conversation <UUID>` or a fresh execution; it never uses
+  `--continue`.
   On resume failure the skill either asks the user (interactive) or
   chooses by severity (headless); the "retry" option is always a fresh
-  `gemini`, not `--last`.
+  `agy`, not implicit resume.
 - **Where in SKILL.md.** Step 7 fallback.
-- **Context.** `--last` silently picks the newest session in the
-  current cwd (§2.4.1), which can be an unrelated one-shot or a
-  parallel user invocation.
+- **Context.** `--continue` selects a recent conversation rather than
+  the id captured for this review (§2.4.1), so it can choose an
+  unrelated one-shot or parallel user invocation.
 - **Alternatives considered.**
-  - *`--last` as first fallback.* Rejected: wrong-session hazard; if
-    the user happens to be running Codex interactively in the same
+  - *`--continue` as first fallback.* Rejected: wrong-session hazard; if
+    the user happens to be running agy interactively in the same
     repo, the skill's "I've revised based on your feedback ..."
     message would be injected into the user's unrelated work.
 - **Chosen because.** The safety failure mode is catastrophic (silent
@@ -619,26 +448,26 @@ Each decision below follows the same template:
 
 ### §4.6. Fresh-exec fallback rebuilds context from conversation history
 
-- **Decision.** When the fallback triggers a fresh `gemini`, Claude
+- **Decision.** When the fallback triggers a fresh `agy`, Codex
   reconstructs the "previous rounds" section of the prompt from the
   conversation — the round-1 review, round-1 fixes, round-2 review,
   round-2 fixes, etc. — which were already shown verbatim to the user
   in earlier Step 5 outputs.
 - **Where in SKILL.md.** Step 7 fallback prompt template.
-- **Context.** The `-o` file at `/tmp/gemini-review-${REVIEW_ID}.md` is
+- **Context.** The extracted file at `/tmp/agy-review-${REVIEW_ID}.md` is
   overwritten on every round. Round-1 review content is gone from disk
   by the time a round-3 fallback triggers.
 - **Alternatives considered.**
   - *Per-round file naming* (`-r1.md`, `-r2.md`, ...). Rejected: user
     preference for minimizing file proliferation. Also required
     matching changes in Step 9 cleanup globs.
-  - *Archive previous -o file before overwrite.* Rejected: adds
+  - *Archive the previous extracted review before overwrite.* Rejected: adds
     complexity (pre-write copy step) for a case that triggers rarely.
 - **Chosen because.** The Step 5 "show review verbatim" contract
   already ensures the content is in conversation history. Leveraging
   that makes a new step unnecessary.
 - **Trade-offs accepted.** Depends on the conversation context window
-  preserving prior outputs. If Claude Code compacts the context
+  preserving prior outputs. If Codex compacts the context
   mid-review, the fallback template may be degraded. No mitigation
   currently; see `§9. Known limitations`.
 
@@ -665,33 +494,34 @@ Each decision below follows the same template:
   prompt wording; prompt drift would be a separate failure mode (see
   §6).
 
-### §4.8. Strict check order: exit → stderr → review → (session-id when needed)
+### §4.8. Strict check order: exit → stderr → JSON → review → id capture
 
-- **Decision.** After every `gemini` / `gemini resume` call,
+- **Decision.** After every fresh or `--conversation` agy call,
   checks run in a fixed order:
   1. Exit code.
   2. Stderr file (even on exit 0).
-  3. `-o` review file semantic sanity.
-  4. Session-id capture (two-tier, `§4.1`). In Step 4 this is skipped
+  3. JSON parse, `status=SUCCESS`, and requested-id equality on resume.
+  4. Extracted review file semantic sanity.
+  5. Conversation-id capture (two-tier, `§4.1`). In Step 4 this is skipped
      on `VERDICT: APPROVED` — no resume will happen, so no session
-     is needed. In Step 7 it is a defensive refresh (thread id
+     is needed. In Step 7 it is a defensive refresh (conversation id
      doesn't rotate per `§2.4.4`) and is skipped identically on
      APPROVED.
 - **Where in SKILL.md.** Steps 4 and 7 post-launch.
-- **Context.** Non-zero exit implies `-o` may not exist; reading it
-  would crash. Exit 0 does not imply everything is fine (e.g., `-o`
-  unwritable case, §2.5). Review-sanity before session-id keeps the
+- **Context.** Non-zero exit implies the JSON response may not exist;
+  extraction then yields an empty review. Exit 0 still does not imply
+  that agy applied the prompt (§2.5). Review sanity before id capture keeps the
   two concerns orthogonal: a broken review aborts on its own merits,
   and a valid APPROVED review completes without depending on
   session-id capture. An earlier draft ordered session-id *before*
   review-sanity, which meant a secondary-capture failure (e.g.,
-  empty `~/.gemini/sessions/` on a first-ever codex run, or a rollout
+  empty `~/.gemini/antigravity-cli/brain/` on a first-ever agy run, or a rollout
   that somehow lacked the session marker) would abort an otherwise-
   successful APPROVED round. The current order avoids that.
 - **Alternatives considered.**
   - *Ad-hoc checks in whatever order.* Rejected: invites null-pointer-
     style crashes on missing files.
-  - *All-at-once check, aggregate errors.* Rejected: harder for Claude
+  - *All-at-once check, aggregate errors.* Rejected: harder for Codex
     to follow step-by-step; harder to recover partial information.
 - **Chosen because.** Deterministic, fail-fast, each check's output
   points to the next action.
@@ -702,35 +532,35 @@ Each decision below follows the same template:
 - **Decision.** The gate enforcing verbatim review output is
   text-based, repeated in three places (Step 4 anti-confusion note,
   Step 5 YOUR-NEXT-MESSAGE instruction, Step 6 precondition check),
-  and backstopped by the architectural fact that `--json` stdout is
+  and backstopped by the architectural fact that JSON stdout is
   non-human-readable so the review can only be accessed via Read on
-  the `-o` file.
+  the extracted review file.
 - **Where in SKILL.md.** Steps 4, 5, 6.
 - **Context.** Earlier design used only "Show the user verbatim" in
-  Step 5. Observed behavior: Opus received the review (began applying
+  Step 5. Observed behavior: the main model received the review (began applying
   fixes that referenced it) but never displayed it to the user. Soft
   instructions can be internally rationalized away (§3.4).
 - **Alternatives considered.**
-  - *Marker-file precondition* — Claude writes
-    `/tmp/gemini-review-${REVIEW_ID}.shown` as the act of showing; Step
+  - *Marker-file precondition* — Codex writes
+    `/tmp/agy-review-${REVIEW_ID}.shown` as the act of showing; Step
     6 verifies the file exists. Rejected: cargo-cult risk. A literal
     reader that skips the show step may still write the marker,
     producing a false audit trail that is worse than no trail. And the
     marker cannot be programmatically enforced from within SKILL.md
     — it is still instructional.
   - *Leave as soft "Show verbatim".* Rejected: the observed bug.
-- **Chosen because.** The `--json` switch does more to prevent the bug
-  than any textual instruction: with stdout as JSONL events, there is
-  no review text in the Bash tool result for Opus to accidentally
-  consume instead of re-reading the `-o` file. The triple text gate
+- **Chosen because.** Machine-readable stdout does more to prevent the bug
+  than any textual instruction: with stdout as a JSON object, there is
+  no review text in the Bash tool result for the main model to accidentally
+  consume instead of re-reading the extracted file. The triple text gate
   is belt-and-braces.
 - **Trade-offs accepted.** Relies on model compliance with the text
-  gate. If a future Opus slips past all three, we will need another
+  gate. If a future model slips past all three, we will need another
   architectural hook (possibly a verifiable marker after all).
 
 ### §4.10. Conditional cleanup (keep temp files on abort)
 
-- **Decision.** Step 9 cleans up `/tmp/gemini-*-${REVIEW_ID}.*` only on
+- **Decision.** Step 9 cleans up `/tmp/agy-*-${REVIEW_ID}.*` only on
   success paths (APPROVED, MAX rounds, NOT VERIFIED). On abort paths
   (launch failure, infrastructure error), the files are left in place.
 - **Where in SKILL.md.** Step 9.
@@ -787,7 +617,7 @@ Each decision below follows the same template:
 - **Context.** A launch failure is an infrastructure issue, not a
   failed review. Counting it against the round budget would be
   inappropriate — the user would get four rounds of review instead of
-  five because of a flaky codex launch.
+  five because of a flaky agy launch.
 - **Alternatives considered.**
   - *Retry consumes a round.* Rejected: see above.
   - *Unlimited retries.* Rejected: creates an infinite loop on
@@ -799,35 +629,30 @@ Each decision below follows the same template:
   rounds, retry budget is inconsistently available. Rules section of
   `SKILL.md` states this explicitly.
 
-### §4.13. Canonical prompt delivery via `cat file | gemini -`
+### §4.13. Canonical prompt delivery as one `--print` argument
 
-- **Decision.** The skill feeds prompts to `gemini` via
-  `cat /tmp/gemini-prompt-*.md | timeout 600 gemini ... -` instead
-  of `gemini ... - < /tmp/gemini-prompt-*.md`.
-- **Where in SKILL.md.** Step 4 (launch), Step 7 (resume), Step 7
-  fresh-exec fallback.
-- **Context.** Both shapes are accepted by codex itself (`§2.1`). In
-  the reference environment they are interchangeable. In at least one
-  Claude Code sandbox, the `- < file` form exits 1 with empty stderr
-  — codex never actually runs, and without a stderr error line the
-  skill has nothing to diagnose. The `cat | pipe` form is unaffected
-  in the same sandbox and produces identical `-o` output.
+- **Decision.** Keep prompts in files, but invoke agy as
+  `agy --print "$(cat /tmp/agy-prompt-*.md)" ...`. Never pipe the file
+  on stdin and never pass positional `-`.
+- **Where in SKILL.md.** Runner R3 for initial, fresh-exec, and resume.
+- **Context.** agy 1.1.12 headless mode requires a prompt argument.
+  The migrated stdin form exited 0 yet returned a generic greeting, so
+  neither exit nor stderr detected that the prompt was ignored.
 - **Alternatives considered.**
-  - *Keep `- < file` as canonical.* Rejected: verified-broken in one
-    target environment.
-  - *Branch by environment (detect sandbox, switch form).* Rejected:
-    over-complicated for a Pareto case. `cat | pipe` is universal.
-  - *Use the trailing-argument form (`gemini ... "$(cat file)"`).*
-    Rejected: shell quoting on long XML prompts is the exact problem
-    file delivery solves.
-- **Chosen because.** `cat | pipe` works in every observed environment
-  at no extra cost. The only visible artifact is in the permission
-  rule (`Bash(cat /tmp/gemini-prompt-* | timeout 600 gemini *)`)
-  which is still prefix-matchable.
-- **Trade-offs accepted.** One extra process (`cat`) per codex launch
-  — negligible. The pipeline exit code semantics are `$?` = last
-  command (codex), which matches what the skill already checks; no
-  `pipefail` needed.
+  - *`cat file | agy --print -`.* Rejected by the observed incident;
+    retained historically in §5.7.
+  - *`agy --print - < file`.* Rejected for the same reason: agy has no
+    documented stdin sentinel.
+  - *Inline the generated prompt directly in the Bash source.* Rejected:
+    prompt text must not become shell syntax and the file is still needed
+    as the transcript-marker mtime anchor.
+- **Chosen because.** Quoted command substitution supplies the exact
+  multiline content as one argv element without re-parsing it as shell
+  code, while preserving the existing prompt artifact and marker binding.
+- **Trade-offs accepted.** Trailing newlines are stripped and the prompt
+  is subject to the OS argv-size limit. After agy returns, the runner saves
+  `$?` as `agy_rc`, extracts `.response`, and exits with `agy_rc`; without
+  that explicit preservation, the extraction command would mask agy's exit.
 
 ---
 
@@ -840,7 +665,7 @@ re-propose them without reading why.
 ### §5.1. Marker file (`.shown` precondition)
 
 Round 2 adversarial review proposed requiring the lead to write
-`/tmp/gemini-review-${REVIEW_ID}.shown` as an atomic "I have shown the
+`/tmp/agy-review-${REVIEW_ID}.shown` as an atomic "I have shown the
 review" signal, with Step 6 hard-gating on its existence.
 
 Rejected: the marker is itself an instructional artifact. A literal
@@ -852,7 +677,7 @@ making review text inaccessible from Bash output, forcing a Read).
 ### §5.2. Per-round file naming
 
 Proposed during Round 2 review: name temp files with both `${REVIEW_ID}`
-and round number (`/tmp/gemini-review-${REVIEW_ID}-r1.md`,
+and round number (`/tmp/agy-review-${REVIEW_ID}-r1.md`,
 `...-r2.md`). Benefits: prior-round diagnostics survive later rounds;
 fresh-exec fallback can read prior review text from disk.
 
@@ -869,14 +694,14 @@ parsing (§4.1).
 
 ### §5.4. `$(pwd)` in composed commands
 
-An intuitive but fragile shortcut. Claude Code's Bash tool does not
+An intuitive but fragile shortcut. The Codex shell tool does not
 persist cwd reliably between calls, so `$(pwd)` can resolve to an
 unexpected directory. Replaced by the single-capture `REPO_ROOT`
 pattern (§4.2).
 
 ### §5.5. Auto-fresh-exec without user consent on resume failure
 
-Earlier skill drafts silently ran a fresh `gemini` whenever resume
+Earlier skill drafts silently ran a fresh `agy` whenever resume
 failed. This burned significant tokens (each fresh exec is a full
 project re-read) for cases that sometimes were not worth re-verifying
 (e.g., only medium-severity findings). Replaced by ask-user /
@@ -888,6 +713,16 @@ Earlier Step 9 unconditionally ran `rm -f` on all temp files at
 end-of-run. That erased diagnostic trail for abort paths. Replaced by
 conditional cleanup (§4.10).
 
+### §5.7. Pipe prompt file to agy stdin
+
+The initial agy migration retained the Codex-era command
+`cat prompt.md | agy --print -`. It appeared attractive because it kept long
+prompts out of shell arguments and preserved the previous permission shape.
+
+Rejected after agy 1.1.12 returned exit 0, empty stderr, and a generic greeting
+instead of applying the prompt. `-` is not a documented stdin sentinel for agy.
+Replaced by the quoted one-argument form in §4.13.
+
 ---
 
 ## §6. Prior diagnostic errors and lessons
@@ -897,10 +732,16 @@ dump from an earlier agent-auditor contained several assertions that
 turned out to be wrong when verified empirically. We document them
 here as a lesson, not as blame.
 
+Sections §6.1–§6.8 are legacy records from the pre-agy reviewer backend.
+Their mechanically migrated command names are superseded and must not be used
+as current agy syntax; current facts begin in §2 and the agy-specific incident
+is §6.9. The records remain because §10.2 requires preserving the reasoning
+behind attempt-scoped transcript binding and fail-closed behavior.
+
 ### §6.1. "Codex stderr is 0 bytes — no `session id:` line is printed"
 
 **Claim.** The auditor's dump claimed that redirecting stderr to a file
-during `gemini` produced an empty file, across eight observed
+during `agy` produced an empty file, across eight observed
 invocations.
 
 **Reality.** In non-`--json` mode, stderr contains a multi-line
@@ -922,7 +763,7 @@ Different root cause; different fix (`--json` for first-line parsing,
 
 **Impact on the design.** Minor — but indicative of measurement sloppiness.
 
-### §6.3. "`gemini resume --last` is unsafe"
+### §6.3. "`agy --continue --last` is unsafe"
 
 **Claim.** The dump implied `--last` picks an arbitrary session.
 
@@ -934,10 +775,10 @@ fix (drop `--last` entirely, §4.5) was driven by the specific risk of
 context injection into user's parallel codex sessions, not by any
 general unsafety.
 
-### §6.4. "`gemini resume <bad-uuid>` exits with code 0"
+### §6.4. "`agy --continue <bad-uuid>` exits with code 0"
 
 **Claim.** The dump (and the first round of adversarial review of our
-own plan) both asserted that `gemini resume` with an invalid UUID
+own plan) both asserted that `agy --continue` with an invalid UUID
 exits 0 — making exit code useless as a success signal.
 
 **Reality.** It exits **1**. stderr has `thread/resume failed`. stdout
@@ -961,9 +802,9 @@ minutes, not hours.
 **Claim trajectory.** An agent running in a different Claude Code
 sandbox reported three issues with the skill:
 
-1. `gemini ... - < /tmp/prompt.md` exits 1 with empty stderr.
-2. `cat file | gemini --json ... -` exits 0 with review file OK
-   but `/tmp/gemini-stdout-*.jsonl` empty (0 bytes).
+1. `agy ... - < /tmp/prompt.md` exits 1 with empty stderr.
+2. `cat file | agy --output-format json ... -` exits 0 with review file OK
+   but `/tmp/agy-stdout-*.jsonl` empty (0 bytes).
 3. Same symptoms under `timeout 120 bash -c '...'` wrapper.
 
 Initial hypothesis: codex version bug. The agent was on 0.120.0,
@@ -1010,7 +851,7 @@ is env-specific until demonstrated otherwise.
 
 **Claim trajectory.** Rounds 1-5 of development converged on a two-tier
 session-id design where the secondary path identified our rollout as
-"newest `rollout-*.jsonl` with mtime greater than a captured pre-exec
+"newest `transcript_full.jsonl` with mtime greater than a captured pre-exec
 timestamp". Rounds 4 and 5 of self-review noted the parallel-codex
 hazard but accepted it as a documented limitation: a narrow race
 window + `--last` being unused were argued as sufficient mitigation.
@@ -1019,7 +860,7 @@ window + `--last` being unused were argued as sufficient mitigation.
 shell on the same machine (user running `codex` in another terminal,
 a CI job, a hook, etc.) creates a newer rollout during the review's
 exec window. The skill's `find -newermt + pick newest` then captures
-that unrelated UUID. `gemini resume <UUID>` succeeds against that
+that unrelated UUID. `agy --continue <UUID>` succeeds against that
 thread, returns a normally-shaped review (`VERDICT:`, `[severity:`)
 for an unrelated artifact, and Step 7's post-resume checks pass. The
 skill applies "fixes" informed by a review of some other work.
@@ -1059,7 +900,7 @@ no-match is the correct default.
 
 **Claim trajectory.** Round 6 (§6.7) introduced positive content-bind
 via `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID} -->`. The live
-e2e test of that design via `gemini` (round 2 of the dogfood
+e2e test of that design via `agy` (round 2 of the dogfood
 loop) flagged a narrower but still real gap: the marker is stable
 across the whole review, not per-launch.
 
@@ -1071,7 +912,7 @@ rollout already contains the `${REVIEW_ID}` marker. The retry's
 fallback grep matches BOTH the first attempt's rollout AND the
 second (successful) attempt's rollout. The skill's "pick any"
 branch then silently picks either — if it picks the first
-(stale) rollout's UUID, later `gemini resume` continues a
+(stale) rollout's UUID, later `agy --continue` continues a
 dead session with content from a failed attempt. All of Step 7's
 post-resume checks would pass on that wrong session.
 
@@ -1096,12 +937,35 @@ multiple on-disk artifacts. The scope of the identifier must match
 the granularity at which rollouts are created — one marker per
 rollout, one rollout per launch, one launch per marker generation.
 
+### §6.9. 2026-08-13: agy migration accepted transport success as prompt success
+
+**Report.** Review `1786638300-60419327` failed twice with exit 0 and empty
+stderr, but the extracted response was the generic greeting "How can I help
+you today?" and contained no verdict.
+
+**Verification.** Official agy headless documentation and local 1.1.12 smoke
+tests agree that `-p` / `--print` requires the prompt as an argument. The
+migrated `cat file | agy --print -` command did not deliver the file. A second
+negative test found the same category of bug in resume: an unknown
+`--conversation` id exits 0, warns on stderr, and silently starts a new
+conversation with a different UUID.
+
+**Mitigation.** Runner R3 now passes `"$(cat prompt-file)"` as the print
+argument. R4 parses `status`, rejects the missing-conversation warning, and
+requires the returned resume UUID to equal the requested UUID before accepting
+even an APPROVED verdict. The id equality is repeated in the transcript
+fallback. Exit status is preserved across response extraction with `agy_rc`.
+
+**Lesson.** For agent CLIs, exit 0 proves only that the process completed.
+Validate that the intended prompt and conversation were applied using semantic
+output checks and stable identity, not transport status alone.
+
 ---
 
 ## §7. Smoke test protocol
 
-Minimal set of checks to run after editing `SKILL.md`, changing the
-Codex invocation pattern, or upgrading Codex CLI. Purpose: detect
+Minimal set of checks to run after editing `SKILL.md` or the runner,
+changing the agy invocation pattern, or upgrading Antigravity CLI. Purpose: detect
 regressions in the external-CLI contract the skill depends on.
 
 Each check is copy-pasteable bash. All use a real git repo; run from
@@ -1113,7 +977,7 @@ the repo root. Expected outputs are in comments.
 REVIEW_ID=$(date +%s)-$(printf '%08d' $RANDOM)
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
 REPO_ROOT=$(git rev-parse --show-toplevel)
-cat > /tmp/gemini-prompt-${REVIEW_ID}.md <<EOF
+cat > /tmp/agy-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 <role>
 You are a senior adversarial reviewer of implementation plans.
@@ -1126,81 +990,93 @@ End the LAST line with exactly: VERDICT: APPROVED
 </output_format>
 EOF
 
-cat /tmp/gemini-prompt-${REVIEW_ID}.md | timeout 300 gemini --json \
-  --model gemini-3.6-flash -c reasoning_effort=xhigh \
-  -s read-only -C "${REPO_ROOT}" \
-  -o /tmp/gemini-review-${REVIEW_ID}.md \
-  - \
-  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
+cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+  --model gemini-3.7-flash --effort high --mode plan \
+  --dangerously-skip-permissions \
+  --output-format json --print-timeout 5m \
+  > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/agy-stderr-${REVIEW_ID}.txt
+AGY_RC=$?
 
-echo "EXIT=$?"                                          # expect 0
-head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl            # reference env: thread.started; affected env: empty
-wc -c /tmp/gemini-stderr-${REVIEW_ID}.txt                # expect 0
-grep -E '^VERDICT:' /tmp/gemini-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
+python3 -c "import sys,json; print(json.load(sys.stdin).get('response',''))" \
+  < /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  > /tmp/agy-review-${REVIEW_ID}.md
+
+echo "EXIT=${AGY_RC}"                                  # expect 0
+python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], d['conversation_id'])" \
+  < /tmp/agy-stdout-${REVIEW_ID}.jsonl                 # expect SUCCESS and UUID
+wc -c /tmp/agy-stderr-${REVIEW_ID}.txt                # expect 0
+grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 
 # Verify the filesystem secondary path also works (§4.1b) — attempt-scoped content-bind.
 # Returns the rollout path that both postdates our prompt file AND contains the per-launch marker.
-find ~/.gemini/sessions -name 'rollout-*.jsonl' \
-  -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
+find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' \
+  -newer /tmp/agy-prompt-${REVIEW_ID}.md \
   -exec grep -l "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" {} + 2>/dev/null
-# expect: exactly one path. Extract the UUID from basename — it must equal the
-# thread_id from the primary path above (if the primary was populated).
+# expect: exactly one path under brain/<conversation_id>/...
 ```
 
 ### §7.2. Resume with cd prefix
 
-Continuing from §7.1 — extract the thread id and resume.
+Continuing from §7.1 — extract the conversation id and resume.
 
 ```bash
-# Primary session-id capture (may be empty in affected sandboxes)
-THREAD_ID=$(head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-  | grep -oE '"thread_id":"[^"]+"' | cut -d'"' -f4)
-# Secondary: attempt-scoped content-bind (§4.1b). POSIX-portable.
-if [ -z "${THREAD_ID}" ]; then
-  ROLLOUT=$(find ~/.gemini/sessions -name 'rollout-*.jsonl' \
-    -newer /tmp/gemini-prompt-${REVIEW_ID}.md \
+# Primary conversation-id capture
+CONVERSATION_ID=$(python3 -c "import sys,json; print(json.load(sys.stdin).get('conversation_id',''))" \
+  < /tmp/agy-stdout-${REVIEW_ID}.jsonl)
+# Secondary: attempt-scoped content-bind (§4.1).
+if [ -z "${CONVERSATION_ID}" ]; then
+  ROLLOUT=$(find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' \
+    -newer /tmp/agy-prompt-${REVIEW_ID}.md \
     -exec grep -l "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" {} + 2>/dev/null \
     | head -1)
-  THREAD_ID=$(basename "${ROLLOUT}" .jsonl \
-    | grep -oE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}')
+  CONVERSATION_ID=$(printf '%s\n' "${ROLLOUT}" \
+    | sed -n 's#^.*/brain/\([^/]*\)/.*#\1#p')
 fi
-echo "THREAD_ID=${THREAD_ID}"                           # expect a UUID
+echo "CONVERSATION_ID=${CONVERSATION_ID}"             # expect a UUID
 
 # Fresh ATTEMPT_ID for the resume launch
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
-cat > /tmp/gemini-resume-prompt-${REVIEW_ID}.md <<EOF
+cat > /tmp/agy-resume-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 Still there? Reply with VERDICT: APPROVED.
 EOF
 
-cd "${REPO_ROOT}" && cat /tmp/gemini-resume-prompt-${REVIEW_ID}.md \
-  | timeout 300 gemini resume --json \
-  "${THREAD_ID}" \
-  -o /tmp/gemini-review-${REVIEW_ID}.md \
-  - \
-  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
+cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
+  --conversation "${CONVERSATION_ID}" \
+  --model gemini-3.7-flash --effort high --mode plan \
+  --dangerously-skip-permissions \
+  --output-format json --print-timeout 5m \
+  > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/agy-stderr-${REVIEW_ID}.txt
+AGY_RC=$?
 
-echo "EXIT=$?"                                          # expect 0
-head -1 /tmp/gemini-stdout-${REVIEW_ID}.jsonl            # reference env: same thread_id (§2.4.4); affected env: empty
-wc -c /tmp/gemini-stderr-${REVIEW_ID}.txt                # expect 0
-grep -E '^VERDICT:' /tmp/gemini-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
+python3 -c "import sys,json; print(json.load(sys.stdin).get('response',''))" \
+  < /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  > /tmp/agy-review-${REVIEW_ID}.md
+
+echo "EXIT=${AGY_RC}"                                  # expect 0
+python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], d['conversation_id'])" \
+  < /tmp/agy-stdout-${REVIEW_ID}.jsonl                 # expect SUCCESS and the same UUID
+wc -c /tmp/agy-stderr-${REVIEW_ID}.txt                # expect 0
+grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 ```
 
 ### §7.3. Resume with bad UUID
 
 ```bash
-echo "test" > /tmp/gemini-bad-resume-prompt.md
-cat /tmp/gemini-bad-resume-prompt.md | timeout 60 gemini resume --json \
-  00000000-0000-0000-0000-000000000000 \
-  - \
-  > /tmp/gemini-bad-resume.stdout \
-  2>/tmp/gemini-bad-resume.stderr
+timeout 60 agy --print "Reply with VERDICT: APPROVED" \
+  --conversation 00000000-0000-0000-0000-000000000000 \
+  --model gemini-3.7-flash --effort high --mode plan \
+  --dangerously-skip-permissions \
+  --output-format json --print-timeout 30s \
+  > /tmp/agy-bad-resume.stdout \
+  2>/tmp/agy-bad-resume.stderr
 
-echo "EXIT=$?"                                          # expect 1
-cat /tmp/gemini-bad-resume.stderr | head -3              # expect "thread/resume failed" line
-wc -c /tmp/gemini-bad-resume.stdout                      # expect 0
+echo "EXIT=$?"                                        # 1.1.12: expect 0 (!)
+head -3 /tmp/agy-bad-resume.stderr                    # expect warning: conversation ... not found
+python3 -c "import sys,json; print(json.load(sys.stdin)['conversation_id'])" \
+  < /tmp/agy-bad-resume.stdout                        # expect a NEW UUID; runner must reject it
 ```
 
 ### §7.4. Bare repo detection
@@ -1214,53 +1090,41 @@ git init --bare "${TMPBARE}" -q
 rm -rf "${TMPBARE}"
 ```
 
-### §7.5. `--last` cwd filter
+### §7.5. Static transport regression guard
 
 ```bash
-# setup two dummy git repos
-mkdir -p /tmp/smoke-cwd-a /tmp/smoke-cwd-b
-( cd /tmp/smoke-cwd-a && git init -q )
-( cd /tmp/smoke-cwd-b && git init -q )
-# run codex in each; capture session ids
-ID_A=$(cd /tmp/smoke-cwd-a && echo "ALPHA" | \
-  gemini -s read-only --model gemini-3.6-flash \
-  -c reasoning_effort=xhigh - 2>&1 | grep 'session id:' | awk '{print $3}')
-ID_B=$(cd /tmp/smoke-cwd-b && echo "BRAVO" | \
-  gemini -s read-only --model gemini-3.6-flash \
-  -c reasoning_effort=xhigh - 2>&1 | grep 'session id:' | awk '{print $3}')
-echo "A=${ID_A}"
-echo "B=${ID_B}"
-# resume --last from cwd-a; expect to resume ID_A, not ID_B
-( cd /tmp/smoke-cwd-a && echo "which?" | \
-  gemini resume --last - 2>&1 | grep 'session id:' )
-# expect: session id matches ID_A
-rm -rf /tmp/smoke-cwd-a /tmp/smoke-cwd-b
+rg -n 'agy --print "\$\(cat /tmp/agy-(resume-)?prompt-' references/runner.md
+# expect: exactly the initial/fresh and resume command lines
+
+if rg -n 'cat .*\|.*agy --print -|--continue --conversation' references/runner.md; then
+  echo "obsolete agy transport found" >&2
+  exit 1
+fi
 ```
 
 ### §7.6. Cleanup smoke artifacts
 
 ```bash
-rm -f /tmp/gemini-prompt-${REVIEW_ID}.md \
-      /tmp/gemini-resume-prompt-${REVIEW_ID}.md \
-      /tmp/gemini-review-${REVIEW_ID}.md \
-      /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-      /tmp/gemini-stderr-${REVIEW_ID}.txt \
-      /tmp/gemini-bad-resume-prompt.md \
-      /tmp/gemini-bad-resume.stdout \
-      /tmp/gemini-bad-resume.stderr
+rm -f /tmp/agy-prompt-${REVIEW_ID}.md \
+      /tmp/agy-resume-prompt-${REVIEW_ID}.md \
+      /tmp/agy-review-${REVIEW_ID}.md \
+      /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+      /tmp/agy-stderr-${REVIEW_ID}.txt \
+      /tmp/agy-bad-resume.stdout \
+      /tmp/agy-bad-resume.stderr
 ```
 
 ### §7.7. If anything fails
 
 If §7.1–§7.5 do not produce the expected outputs:
 
-1. Note the exact codex CLI version (`codex --version`).
+1. Note the exact Antigravity CLI version (`agy --version`).
 2. Check against the facts in `§2`. If your observation contradicts a
    `§2` fact, the design may need adjustment — propose via PR and
    include a new entry in `§8. Version and verification log` for the
-   new Codex version.
-3. If the contradiction is severe (e.g., `--json` format change,
-   `-o` no longer works in `resume`), mark `§2` entries outdated
+   new agy version.
+3. If the contradiction is severe (e.g., JSON schema or
+   `--conversation` behavior changed), mark `§2` entries outdated
    before modifying `SKILL.md`. Future contributors should know which
    facts they can still trust.
 
@@ -1268,12 +1132,10 @@ If §7.1–§7.5 do not produce the expected outputs:
 
 ## §8. Version and verification log
 
-| Date | Codex CLI | Claude Code | Verifier | Notes |
-|------|-----------|-------------|----------|-------|
-| 2026-04-17 | 0.121.0 | current at time of refactor | initial author | All §2 facts verified; §7 smoke test passes end to end. Initial commit of this document. |
-| 2026-04-17 | 0.121.0 | containerized sandbox (yantar-k8s) | external agent + lead | §7.1 `- < file` form fails EXIT=1 with empty stderr. `cat \| pipe` form works for `-o` review, but `--json` stdout is empty. Filesystem secondary session-id capture (§4.1b) verified functional: UUID extracted from rollout filename successfully resumes. Not a version issue (reproduced on 0.120.0 and 0.121.0). Root cause undiagnosed — see §6.6. Skill adapted: `§4.1` now two-tier, `§4.13` switches canonical form to `cat \| pipe`. |
-| 2026-04-17 | 0.121.0 | reference env (WSL2) | live dogfood + team review | Round 6: timestamp-only secondary (§4.1b as of round 5) flagged for silent wrong-session hazard against parallel codex. Verified empirically that rollout JSONL contains prompt text (3 matches of prompt content via grep). Replaced with positive content-binding: prompt marker `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID} -->` + `find -newer <prompt> -exec grep -l <REVIEW_ID> {} +`. All flags POSIX — GNU-find dependency of earlier §9.5 goes away. See §6.7. |
-| 2026-04-17 | 0.121.0 | reference env (WSL2) | live dogfood round 2 | Round 7: review-stable marker flagged as insufficient — SKILL.md's own launch-retry flow can leave multiple rollouts matching the same `${REVIEW_ID}`, and "pick any" reintroduces silent intra-review session drift. Fixed by adding per-launch `${ATTEMPT_ID}` (6-digit random regenerated for every exec/retry/resume/fresh-exec). Marker is now `${REVIEW_ID}-${ATTEMPT_ID}`. Multi-match changed from "pick any" to fail-closed. See §6.8. |
+| Date | Reviewer CLI | Harness | Verifier | Notes |
+|------|--------------|---------|----------|-------|
+| 2026-04-17 | Codex CLI 0.121.0 (pre-agy backend) | reference + container sandboxes | initial author + reviewers | Historical contract and the two-tier, attempt-scoped transcript binding were developed here; details retained in §6.6–§6.8. |
+| 2026-08-13 | agy 1.1.12 | Codex workspace | Codex | Reproduced the migrated stdin bug from review `1786638300-60419327`. Verified `--print "$(cat file)"`, JSON extraction, transcript marker binding, stable explicit resume, and exit-0/new-UUID behavior for a missing conversation. Real-diff dogfood also showed headless command auto-denial without `--dangerously-skip-permissions`, two `--sandbox` connection-reset failures, and `SUCCESS` without that unstable flag (§9.7). Updated §2, §6.9, and §7. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1282,11 +1144,12 @@ triggered by §7.7), add a row. Keep the log chronological.
 
 ## §9. Known limitations and future work
 
-### §9.1. Parallel codex in the same cwd
+### §9.1. Parallel agy in the same cwd
 
-If the user runs `gemini` manually in the same working tree while
-the skill is mid-review, `~/.gemini/sessions/` will contain sessions
-from both processes. The skill does not use `--last`, so this does not
+If the user runs `agy` manually in the same working tree while
+the skill is mid-review, `~/.gemini/antigravity-cli/brain/` will contain sessions
+from both processes. The skill does not use implicit `--continue`, and
+the fallback requires the attempt-scoped marker, so this does not
 cause wrong-session hazards, but the user's parallel work may produce
 rollout files that are filesystem-level noise during debugging.
 
@@ -1297,12 +1160,12 @@ own parallel invocations.
 ### §9.2. Context compaction risk in fresh-exec fallback
 
 The fallback template (§4.6) rebuilds prior rounds from conversation
-history. If Claude Code's context compaction kicks in mid-review and
+history. If Codex context compaction kicks in mid-review and
 summarizes earlier rounds, the rebuilt template is degraded — the new
 reviewer may see a summary instead of the original verbatim findings.
 
 Not mitigated today. If encountered in practice, options include
-archiving each round's `-o` file to a per-round name (§5.2 idea,
+archiving each extracted review to a per-round name (§5.2 idea,
 currently rejected), or persisting the review chain to a single
 append-only file in `/tmp` that the fallback reads directly.
 
@@ -1328,8 +1191,8 @@ sanitation. This is a user-visible limitation; in practice repo paths
 rarely contain these characters.
 
 If this becomes an issue, the fix is to sanitize / escape before
-substitution, which requires careful handling of double-quoted `-C`
-argument and single-quoted `cd` prefix.
+substitution, which requires careful handling of the double-quoted
+`cd` prefix and the command-substitution prompt argument.
 
 ### §9.5. macOS not end-to-end tested
 
@@ -1338,12 +1201,12 @@ The secondary session-id capture (`§4.1b`) uses only POSIX find flags
 work identically on macOS as on Linux. However, the skill has not
 been end-to-end tested on macOS. Edge cases that may differ:
 
-- Default shell (zsh on modern macOS vs bash on Linux) — the skill's
-  Bash-tool commands do not rely on bash-specific features (the
-  `cat | pipe` form is POSIX), so this is unlikely to matter.
-- `~/.gemini/sessions` layout — expected identical on both platforms
-  (codex-cli is cross-platform).
-- Permission prompts for `find ~/.gemini/sessions*` — should match
+- Default shell (zsh on modern macOS vs bash on Linux) — the harness's
+  Bash tool is required because the runner captures `agy_rc` and uses
+  quoted command substitution.
+- `~/.gemini/antigravity-cli/brain` layout — expected identical on both platforms
+  (agy is cross-platform).
+- Permission prompts for `find ~/.gemini/antigravity-cli/brain*` — should match
   the pattern on any Codex harness.
 
 If a macOS user reports breakage, add findings to `§6` and file a
@@ -1354,11 +1217,29 @@ version-log row in `§8`.
 `§7. Smoke test protocol` is manual. Automating it would require:
 
 - A `scripts/smoke.sh` with the checks from §7.
-- A way to run under a non-interactive codex auth. Today codex auth is
-  per-user; CI integration requires exchanging an `OPENAI_API_KEY`
-  via environment variables.
+- A way to run under non-interactive agy authentication. Headless mode
+  currently relies on credentials cached by an interactive sign-in.
 
 Deferred until there is a CI story for the repo.
+
+### §9.7. agy 1.1.12 sandbox instability and headless permissions
+
+Headless agy cannot prompt for command-tool approval. Without an allow rule or
+`--dangerously-skip-permissions`, a real code review returns `SUCCESS` with an
+empty response after `git diff` is auto-denied. The portable runner therefore
+uses `--dangerously-skip-permissions` together with `--mode plan` and explicit
+no-write reviewer instructions.
+
+The stronger-looking `--sandbox` flag was tested twice on the real repository
+diff. Both runs produced a complete verdict but set JSON `status=ERROR` with
+`connecting to sandbox server ... connection reset by peer`; the runner's
+strict status check correctly rejected them. Until agy's sandbox is stable in
+the target environment, it is not usable for this skill.
+
+Trade-off: plan mode and prompt constraints are model/CLI enforcement rather
+than an OS-level read-only mount. Use the skill only on trusted repositories.
+Re-test `--sandbox` after agy upgrades; restoring it is preferred once §7
+passes with `status=SUCCESS` on a review that executes repository commands.
 
 ---
 
@@ -1368,16 +1249,16 @@ Deferred until there is a CI story for the repo.
 
 Revise this document when any of the following happens:
 
-- **Codex CLI releases.** If a release changes any of §2's facts —
-  e.g., a new `resume` flag, a change in `--json` event format, a
-  fix to thread_id rotation, a new exit code — re-run §7, then
+- **Antigravity CLI releases.** If a release changes any of §2's facts —
+  e.g., a prompt-file flag, a change in JSON output, a change to
+  `--conversation`, or a new exit code — re-run §7, then
   update §2 and add a row to §8. If a design decision in §4 relied
   on the old behavior, evaluate whether the decision still holds
   and revise or rationalize.
-- **A new Claude model generation.** Later Opus releases tend to
+- **A new Codex model generation.** Later models may
   interpret `SKILL.md` instructions more literally. What worked as
   a "soft rule" in the previous generation may fail for the next.
-  When a new Opus ships, re-run the skill end-to-end on a small
+  When a new default model ships, re-run the skill end-to-end on a small
   artifact (smoke test from the user side, not just from the CLI
   side) and check that review output is actually shown to the user,
   that the fixes are applied, that the verdict is parsed. If not,
@@ -1435,23 +1316,21 @@ the current generation. Rules of thumb:
 
 - `SKILL.md` — authoritative source of runtime behavior.
 - `README.md` — user-facing install, permissions, troubleshooting.
-- Codex CLI documentation: https://developers.openai.com/codex/cli
-- Codex CLI non-interactive mode: https://developers.openai.com/codex/noninteractive
-- Codex CLI command-line reference: https://developers.openai.com/codex/cli/reference
-- Codex GitHub issue #12538 (resume `-o` support): https://github.com/openai/codex/issues/12538
-- Codex GitHub issue #14544 (resume exec sessions): https://github.com/openai/codex/issues/14544
+- Antigravity CLI documentation: https://antigravity.google/docs/cli
+- Antigravity headless mode: https://antigravity.google/docs/cli/headless
+- Codex documentation (host/orchestrator): https://developers.openai.com/codex
 
 ## §12. Subagent architecture
 
 ### §12.1 The residue problem
 
-Before this split, the entire skill ran in the main Claude thread. Each round's `Bash` tool call produced result content that Claude's context caches: the codex stdout JSONL stream (often 200-500KB when populated), the stderr file (small but growing), and the grep-over-rollout that reads file content. Across 5 rounds and a long conversation, cache-read residue accumulated to ~48M tokens per invocation.
+Before this split, the entire skill ran in the main Codex thread. Each round's Bash call exposed the external review result, stderr, and transcript searches to the main context. Across repeated rounds this created large, irrelevant context residue.
 
 ### §12.2 The split
 
-Claude Code's Agent tool dispatches a fresh subagent with its own isolated context. When the subagent returns, its context is discarded; only its final text message crosses to main. By making the runner subagent own every codex-exec artifact and return only a ~1KB JSON summary file plus the small review file path, the main thread no longer pays the residue tax.
+The subagent tool dispatches a fresh runner with isolated context. When the runner returns, only its final text crosses to main. The runner owns every agy artifact and returns only a small JSON summary path; main later reads the extracted review file explicitly.
 
-The runner uses a two-channel protocol: the authoritative structured result is written to `/tmp/gemini-runner-result-${REVIEW_ID}.json`, and the runner's final message is a single `RUNNER_RESULT_AT: <path>` line. Main extracts the path with a tolerant regex (markdown fences and minor wrapping do not break parsing) and reads the JSON file directly. This avoids the brittle "raw JSON in message" contract that Sonnet's conversational output style would otherwise stress.
+The runner uses a two-channel protocol: the authoritative structured result is written to `/tmp/agy-runner-result-${REVIEW_ID}.json`, and the runner's final message is a single `RUNNER_RESULT_AT: <path>` line. Main extracts the path with a tolerant regex (markdown fences and minor wrapping do not break parsing) and reads the JSON file directly. This avoids a brittle raw-JSON-in-message contract across model versions.
 
 **Runner spec is passed by path, not inlined.** Main resolves `RUNNER_SPEC_PATH` (3-tier filesystem lookup in SKILL.md Step 4) and passes the absolute path to the subagent — the subagent Reads runner.md itself. Main never Reads runner.md. Rationale: inlining the full spec (~12K) into every Agent-tool prompt would re-add ~12K × rounds (up to 5) to main's context per review — 60K of avoidable overhead. Bootstrap instruction in the Agent prompt is ~400 bytes; the spec lives only in the disposable subagent context.
 
@@ -1459,19 +1338,17 @@ The runner uses a two-channel protocol: the authoritative structured result is w
 
 Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
 
-**The full invariant:** *exactly 2 codex invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure — specifically Round-2 finding #1 identified that a user-offered timeout retry → fresh-exec cascade could produce up to 6 invocations per round if retry logic existed at multiple layers. Terminal-at-main closes this lane.
+**The full invariant:** *exactly 2 agy invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
 
 Fresh-exec fallback is a *separate round* that consumes a round counter slot and gets its own fresh 2-attempts budget; this matches pre-refactor §2.4 where fresh-exec also counted as one round.
 
 ### §12.4 Archival ownership
 
-Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr so they survive the next dispatch's file-reuse. Pre-refactor, main did this via its own `mv`. Post-refactor the runner does it inside Step R5 (only on resume failure). Rationale: main never references `/tmp/gemini-stdout-*` or `/tmp/gemini-stderr-*` paths in its own Bash argv, strengthening the isolation claim (no leak by path-reference). Archived paths are returned in the result JSON as `archived_stdout` / `archived_stderr`; main includes them in Step 9 cleanup per its unchanged `rm` glob.
+Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr so they survive the next dispatch's file-reuse. Pre-refactor, main did this via its own `mv`. Post-refactor the runner does it inside Step R5 (only on resume failure). Rationale: main never references `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` paths in its own Bash argv, strengthening the isolation claim (no leak by path-reference). Archived paths are returned in the result JSON as `archived_stdout` / `archived_stderr`; main includes them in Step 9 cleanup per its unchanged `rm` glob.
 
 ### §12.5 Model choice
 
-The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry once, archive on resume failure, write result JSON. No code understanding, no severity judgment, no review interpretation. Sonnet is sufficient and cheaper per token than Opus. The main thread (Opus) keeps all judgment work (applying fixes, deciding round progression, user interaction).
-
-To avoid confusion, the runner's input schema uses `CODEX_MODEL` (the model codex CLI launches) — distinct from the runner's OWN model, which is passed via the Agent tool's `model: "sonnet"` parameter. The names are intentionally non-overlapping.
+The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry once, archive on resume failure, and write result JSON. It performs no severity judgment or review interpretation; the main Codex thread keeps all judgment work. The input field `AGY_MODEL` names the external reviewer model and must not be confused with the model executing the runner subagent.
 
 ### §12.6 Invariants preserved
 
@@ -1482,9 +1359,10 @@ The attempt-scoped `ADVERSARIAL-REVIEW-SESSION` marker (round-7 finding) and pos
 > **Status:** this subsection is empirically determined by Task 7 Step 4's Plan Mode smoke test. Until that task runs and the implementer updates this subsection with observed behavior, treat every claim here as a HYPOTHESIS, not documented fact.
 
 **Hypothesis to test:** Plan Mode restrictions propagate from main to any subagent main dispatches; the subagent inherits limitations on Write/Edit/Bash. If this holds:
-- Main's Write to `/tmp/gemini-body-*.md` may trigger a permission prompt or exit Plan Mode.
-- The runner's Writes to `/tmp/gemini-prompt-*.md` (Step R2, including the mtime-bump repeat Write) may also trigger prompts.
-- The runner's `gemini` (read-only sandbox) should be unaffected since it writes nothing to the user's repo.
+- Main's Write to `/tmp/agy-body-*.md` may trigger a permission prompt or exit Plan Mode.
+- The runner's Writes to `/tmp/agy-prompt-*.md` (Step R2, including the mtime-bump repeat Write) may also trigger prompts.
+- The runner's agy process uses plan mode and a no-write prompt, but its tool
+  approvals are non-interactive; see §9.7.
 
 **What Task 7 Step 4 must determine:**
 1. Does dispatching the Agent tool from Plan Mode work (is it blocked, does it prompt, does it just work)?

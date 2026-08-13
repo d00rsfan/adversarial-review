@@ -2,7 +2,7 @@
 
 Codex skill for adversarial AI code and plan review.
 
-One AI writes the code (Codex master). Another tears it apart (Gemini 3.6 Flash Extra High effort reviewer). Iterate until approved.
+One AI writes the code (Codex master). Another tears it apart (Antigravity `gemini-3.7-flash`, high effort reviewer). Iterate until approved.
 
 ## What is this
 
@@ -12,8 +12,8 @@ and tries to break confidence in the change. It looks for what will fail
 in production, not what might be nice to improve.
 
 This is a Codex skill — a `SKILL.md` file plus a small `references/runner.md` that together
-teach OpenAI Codex how to run adversarial reviews through Google Gemini
-(model `gemini-3.6-flash`, reasoning effort `xhigh`).
+teach OpenAI Codex how to run adversarial reviews through Antigravity CLI (agy)
+(model `gemini-3.7-flash`, reasoning effort `high`).
 
 ## Key features
 
@@ -31,7 +31,7 @@ teach OpenAI Codex how to run adversarial reviews through Google Gemini
 ```
 ┌─────────┐     ┌──────────┐     ┌─────────┐
 │  Codex  │────>│ Reviewer  │────>│  Codex  │
-│  (code) │     │ (Gemini) │     │  (fix)  │
+│  (code) │     │ (Antigravity) │     │  (fix)  │
 └─────────┘     └──────────┘     └─────────┘
      ^                                 │
      │         ┌──────────┐            │
@@ -57,23 +57,24 @@ Mode is auto-detected from context, or you can force it with an argument.
 ### 1. Prerequisites
 
 [OpenAI Codex CLI](https://github.com/openai/codex) and
-Google Gemini CLI (`gemini`) must be installed.
+[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`) must be installed.
 
 Verify both are available:
 
 ```bash
-codex --version    # OpenAI Codex CLI
-gemini --version   # Google Gemini CLI
+codex --version  # OpenAI Codex CLI
+agy --version    # Antigravity CLI
 ```
 
-**Authentication.** Gemini needs API credentials. Either set `GEMINI_API_KEY` env var or sign in via Gemini CLI.
+**Authentication.** Antigravity needs API credentials. Either set `GEMINI_API_KEY` env var or sign in via Antigravity CLI.
 
 ### 2. Install the skill
 
 ```bash
 git clone https://github.com/d00rsfan/adversarial-review.git
+cd adversarial-review
 mkdir -p ~/.codex/skills
-ln -sfn "$(pwd)/adversarial-review" ~/.codex/skills/adversarial-review
+ln -sfn "$(pwd)" ~/.codex/skills/adversarial-review
 ```
 
 Verify both the skill entry-point AND the runner subagent spec are in place:
@@ -89,7 +90,7 @@ ls -la ~/.codex/skills/adversarial-review/references/runner.md
 
 ### 3. Add permissions
 
-The skill runs `git`, `gemini`, and writes temp files to `/tmp`.
+The skill runs `git`, `agy`, and writes temp files to `/tmp`.
 Without pre-approved permissions, Codex will prompt for each action.
 
 Permissions should go into `~/.codex/settings.json` (global) or project settings:
@@ -101,33 +102,34 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 "Bash(git status*)",
 "Bash(git symbolic-ref*)",
 "Bash(git rev-parse*)",
-// Gemini: initial launch (uses prompt fed via cat | pipe)
-"Bash(cat /tmp/gemini-prompt-* | timeout 600 gemini *)",
-// Gemini: resume (cd prefix because resume pins cwd; prompt via cat | pipe)
-"Bash(cd * && cat /tmp/gemini-resume-prompt-* | timeout 600 gemini resume *)",
-// Session-id filesystem fallback (POSIX: find -newer + grep -l for content-match)
-"Bash(find ~/.gemini/sessions*)",
-"Bash(ls -t ~/.gemini/sessions*)",
-// Temp files: prompts (initial + resume), plans, review output, JSONL stdout, stderr
-"Write(/tmp/gemini-plan-*)",
-"Write(/tmp/gemini-prompt-*)",
-"Write(/tmp/gemini-resume-prompt-*)",
-"Read(/tmp/gemini-review-*)",
-"Read(/tmp/gemini-stdout-*)",
-"Read(/tmp/gemini-stderr-*)",
+// Antigravity: initial/fresh/resume launch (prompt is one --print argument)
+"Bash(cd * && timeout 600 agy --print *)",
+// Prompt-file reads performed by the quoted command substitutions
+"Bash(cat /tmp/agy-prompt-*)",
+"Bash(cat /tmp/agy-resume-prompt-*)",
+// Conversation-id filesystem fallback (find -newer + grep -l content match)
+"Bash(find ~/.gemini/antigravity-cli/brain*)",
+"Bash(ls -t ~/.gemini/antigravity-cli/brain*)",
+// Temp files: prompts (initial + resume), plans, review output, JSON stdout, stderr
+"Write(/tmp/agy-plan-*)",
+"Write(/tmp/agy-prompt-*)",
+"Write(/tmp/agy-resume-prompt-*)",
+"Read(/tmp/agy-review-*)",
+"Read(/tmp/agy-stdout-*)",
+"Read(/tmp/agy-stderr-*)",
 // Archive failed-resume diagnostics before fresh exec overwrites them
-"Bash(mv /tmp/gemini-stdout-* /tmp/gemini-stdout-*-failed-resume.jsonl)",
-"Bash(mv /tmp/gemini-stderr-* /tmp/gemini-stderr-*-failed-resume.txt)",
+"Bash(mv /tmp/agy-stdout-* /tmp/agy-stdout-*-failed-resume.jsonl)",
+"Bash(mv /tmp/agy-stderr-* /tmp/agy-stderr-*-failed-resume.txt)",
 // Cleanup
-"Bash(rm -f /tmp/gemini-*)",
+"Bash(rm -f /tmp/agy-*)",
 // Main thread: write prompt body for the runner subagent
-"Write(/tmp/gemini-body-*)",
+"Write(/tmp/agy-body-*)",
 // Main thread: read the structured JSON result returned by the runner
-"Read(/tmp/gemini-runner-result-*)",
+"Read(/tmp/agy-runner-result-*)",
 // Runner subagent (inherited): read the prompt body main wrote
-"Read(/tmp/gemini-body-*)",
+"Read(/tmp/agy-body-*)",
 // Runner subagent (inherited): write the result JSON main reads
-"Write(/tmp/gemini-runner-result-*)",
+"Write(/tmp/agy-runner-result-*)",
 // Runner-spec discovery
 "Bash(ls ~/.codex/skills/adversarial-review/references/runner.md*)",
 "Bash(ls ~/.codex/plugins/cache/*/*/*/skills/adversarial-review/references/runner.md*)"
@@ -144,23 +146,24 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
       "Bash(git status*)",
       "Bash(git symbolic-ref*)",
       "Bash(git rev-parse*)",
-      "Bash(cat /tmp/gemini-prompt-* | timeout 600 gemini *)",
-      "Bash(cd * && cat /tmp/gemini-resume-prompt-* | timeout 600 gemini resume *)",
-      "Bash(find ~/.gemini/sessions*)",
-      "Bash(ls -t ~/.gemini/sessions*)",
-      "Write(/tmp/gemini-plan-*)",
-      "Write(/tmp/gemini-prompt-*)",
-      "Write(/tmp/gemini-resume-prompt-*)",
-      "Read(/tmp/gemini-review-*)",
-      "Read(/tmp/gemini-stdout-*)",
-      "Read(/tmp/gemini-stderr-*)",
-      "Bash(mv /tmp/gemini-stdout-* /tmp/gemini-stdout-*-failed-resume.jsonl)",
-      "Bash(mv /tmp/gemini-stderr-* /tmp/gemini-stderr-*-failed-resume.txt)",
-      "Bash(rm -f /tmp/gemini-*)",
-      "Write(/tmp/gemini-body-*)",
-      "Read(/tmp/gemini-runner-result-*)",
-      "Read(/tmp/gemini-body-*)",
-      "Write(/tmp/gemini-runner-result-*)",
+      "Bash(cd * && timeout 600 agy --print *)",
+      "Bash(cat /tmp/agy-prompt-*)",
+      "Bash(cat /tmp/agy-resume-prompt-*)",
+      "Bash(find ~/.gemini/antigravity-cli/brain*)",
+      "Bash(ls -t ~/.gemini/antigravity-cli/brain*)",
+      "Write(/tmp/agy-plan-*)",
+      "Write(/tmp/agy-prompt-*)",
+      "Write(/tmp/agy-resume-prompt-*)",
+      "Read(/tmp/agy-review-*)",
+      "Read(/tmp/agy-stdout-*)",
+      "Read(/tmp/agy-stderr-*)",
+      "Bash(mv /tmp/agy-stdout-* /tmp/agy-stdout-*-failed-resume.jsonl)",
+      "Bash(mv /tmp/agy-stderr-* /tmp/agy-stderr-*-failed-resume.txt)",
+      "Bash(rm -f /tmp/agy-*)",
+      "Write(/tmp/agy-body-*)",
+      "Read(/tmp/agy-runner-result-*)",
+      "Read(/tmp/agy-body-*)",
+      "Write(/tmp/agy-runner-result-*)",
       "Bash(ls ~/.codex/skills/adversarial-review/references/runner.md*)",
       "Bash(ls ~/.codex/plugins/cache/*/*/*/skills/adversarial-review/references/runner.md*)"
     ]
@@ -170,10 +173,14 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 
 </details>
 
-**Security note:** The `gemini` rule allows any `gemini` invocation
-wrapped in `timeout 600`. The skill only uses read-only mode,
+**Security note:** The `agy` rule allows any `agy` invocation
+wrapped in `timeout 600`. The skill passes `--mode plan`, and every reviewer
+prompt explicitly prohibits file changes. It also passes
+`--dangerously-skip-permissions` because headless agy cannot interactively
+approve the commands needed to inspect a repository. This flag auto-approves
+agy tool calls, so use the skill only on repositories you trust,
 but Codex's permission patterns are prefix-based and cannot enforce flag
-constraints. If you prefer tighter control, omit the `gemini` rule and
+constraints. If you prefer tighter control, omit the `agy` rule and
 approve each invocation manually.
 
 ### 4. Use
@@ -183,8 +190,7 @@ approve each invocation manually.
 /adversarial-review plan                  # force plan review
 /adversarial-review code                  # force code review
 /adversarial-review path/to/f             # review a specific file
-/adversarial-review xhigh                 # extra high reasoning effort (default)
-/adversarial-review model:gemini-3.6-flash # specify gemini model
+/adversarial-review model:gemini-3.7-flash # specify agy model
 ```
 
 ## Prompt architecture
@@ -206,40 +212,40 @@ See [examples/review-output.md](examples/review-output.md) for a sample review.
 
 ## Troubleshooting
 
-**Gemini execution exits with model error.**
-Ensure `GEMINI_API_KEY` is exported or Gemini CLI is authenticated.
-The default `gemini-3.6-flash` works with API key auth.
+**Antigravity execution exits with model error.**
+Ensure `GEMINI_API_KEY` is exported or Antigravity CLI is authenticated.
+The default `gemini-3.7-flash` works with API key auth.
 Override with `/adversarial-review model:<name>`.
 
 **Permission prompts on every action.**
 Add the permissions from the [setup section](#3-add-permissions). Check that
 the file is valid JSON and in the right location (`~/.codex/settings.json`).
 
-**Gemini hangs / timeout (exit code 124).**
-All reviewer calls are wrapped in `timeout 600` (10 minutes). If you see
-exit code 124, the reviewer did not respond in time. Retry — this is usually
+**Antigravity hangs / timeout (exit code 124).**
+All reviewer calls use `--print-timeout 10m` and are also wrapped in
+`timeout 600`. If you see exit code 124, the reviewer did not respond in time.
+Retry — this is usually
 transient.
 
 **Resume fails with session error.**
-The skill uses `gemini resume <session-id>` for rounds 2+. On failure
-(non-zero exit, `thread/resume failed` in stderr, or a malformed review),
+The skill uses `agy --conversation <conversation-id>` for rounds 2+. On failure
+(non-zero exit, missing-conversation warning, changed conversation id, or a malformed review),
 the skill does NOT silently fall back. In an interactive session it asks
-whether to run a fresh Gemini execution (higher token cost) or conclude the
+whether to run a fresh Antigravity execution (higher token cost) or conclude the
 review as NOT VERIFIED. In headless runs it decides based on the maximum
 severity of the last successful round's findings: critical/high → fresh
 exec; medium-only → conclude as NOT VERIFIED.
 
-**JSON stdout is empty (session ID capture noise).**
-In some sandbox configurations `--json` event stream is
-suppressed when stdout is redirected to a file — `/tmp/gemini-stdout-*.jsonl`
-ends up 0 bytes even though the review itself (`-o /tmp/gemini-review-*.md`)
-completes correctly. The skill handles this automatically via a filesystem
-fallback: every prompt includes a **per-launch** session marker
+**JSON output lacks a conversation ID.**
+Antigravity `--output-format json` emits one JSON object whose `response`
+becomes `/tmp/agy-review-*.md` and whose `conversation_id` is used for the
+next round. If that field is absent or the object cannot be parsed, the skill
+uses a filesystem fallback: every prompt includes a **per-launch** session marker
 (`<!-- ADVERSARIAL-REVIEW-SESSION: <REVIEW_ID>-<ATTEMPT_ID> -->`) where
 `ATTEMPT_ID` is a fresh random integer regenerated for the initial exec,
 every retry, every resume, and every fresh-exec fallback. The marker is
-written to the rollout JSONL on disk. When the JSONL stream is empty, the
-skill runs `find ~/.gemini/sessions -name 'rollout-*.jsonl' -newer
+written to the rollout transcript on disk. The skill runs
+`find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' -newer
 <prompt-file> -exec grep -l <REVIEW_ID>-<ATTEMPT_ID> {} +` to positively
 identify this specific launch's rollout and extracts the UUID from the filename.
 Zero or multiple matches → the skill fails closed with a diagnostic rather
@@ -270,10 +276,14 @@ review correctness.
 
 - **Plan Mode and `/tmp` writes.** Writing review prompts to `/tmp` may trigger
   a permission prompt or cause Plan Mode to exit. Does not affect review correctness.
-- **`resume` inherits sandbox.** `gemini resume` inherits sandbox settings
-  from the original session (always `read-only`).
-- **`resume` has no `-C` flag.** The skill captures `REPO_ROOT` via
-  `git rev-parse --show-toplevel` at Step 2 and prefixes every resume with
+- **Headless agy tool approvals.** The runner uses `--mode plan` and explicit
+  no-write prompts, but must also use `--dangerously-skip-permissions` so agy
+  can run repository-inspection commands without an interactive prompt. Treat
+  reviewed repositories as trusted input. agy 1.1.12's `--sandbox` is not used
+  because repeated real-diff runs ended with sandbox-server connection resets.
+- **Explicit conversation resume has no cwd flag.** The skill captures
+  `REPO_ROOT` via `git rev-parse --show-toplevel` at Step 2 and prefixes
+  every initial, fresh, and `--conversation` launch with
   `cd '<REPO_ROOT>' && ...`. This requires paths without single quotes;
   pathological paths (containing `'`, `"`, `$`, backtick, newline) cause
   the skill to abort at Step 2.

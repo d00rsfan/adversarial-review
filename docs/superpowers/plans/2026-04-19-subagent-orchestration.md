@@ -4,7 +4,7 @@
 
 **Goal:** Extract codex-exec orchestration (prompt writing, launch, strict checks, session-id capture, retry) from the main-thread skill into a thin Haiku subagent runner. Main thread keeps review display + code fixes + round control. Eliminates the ~48M-token residue tax that currently bloats the main thread context after each `/adversarial-review` invocation.
 
-**Architecture:** Main thread performs mode detection, review-material prep, review display, and code fixes — all small-context operations. The expensive mechanics (codex launch, JSONL parsing, rollout-file content-matching, retry on launch failure) run inside a Haiku subagent dispatched via the Agent tool. The subagent's 250K context is disposed when it completes; only a small JSON result (~1K) plus the final review file path crosses back to main. Main reads `/tmp/codex-review-${REVIEW_ID}.md` (2-5K) for the verbatim display.
+**Architecture:** Main thread performs mode detection, review-material prep, review display, and code fixes — all small-context operations. The expensive mechanics (codex launch, JSONL parsing, transcript_full-file content-matching, retry on launch failure) run inside a Haiku subagent dispatched via the Agent tool. The subagent's 250K context is disposed when it completes; only a small JSON result (~1K) plus the final review file path crosses back to main. Main reads `/tmp/codex-review-${REVIEW_ID}.md` (2-5K) for the verbatim display.
 
 **Tech Stack:** Bash, Codex CLI, Claude Code's Agent tool (subagent_type: general-purpose, model: haiku), markdown.
 
@@ -234,12 +234,12 @@ Read `/tmp/codex-stdout-${REVIEW_ID}.jsonl`. If the first line parses as JSON wi
 The anchor file is `/tmp/codex-prompt-${REVIEW_ID}.md` for initial/fresh-exec, or `/tmp/codex-resume-prompt-${REVIEW_ID}.md` for resume.
 
 ```bash
-find ~/.codex/sessions -name 'rollout-*.jsonl' -newer <anchor> -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} + 2>/dev/null
+find ~/.codex/sessions -name 'transcript_full.jsonl' -newer <anchor> -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} + 2>/dev/null
 ```
 
 **Interpret the result by STDOUT, not exit code.** Split the command's stdout on newlines; count non-empty lines. Empty stdout means ZERO paths regardless of the pipeline's exit status (`find` returning no matches and `grep -l` matching nothing in found files both yield empty stdout with different exit codes; treat both as zero).
 
-- **Exactly one path** → extract the trailing UUID from the filename (pattern `rollout-<ISO-timestamp>-<UUID>.jsonl`; UUID is the 36-char hex-and-dashes segment before `.jsonl`), then write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
+- **Exactly one path** → extract the trailing UUID from the filename (pattern `transcript_full-<ISO-timestamp>-<UUID>.jsonl`; UUID is the 36-char hex-and-dashes segment before `.jsonl`), then write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
 
 ```json
 {

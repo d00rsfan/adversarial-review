@@ -2,7 +2,7 @@
 
 > This file is read by a subagent dispatched from `SKILL.md` Step 4 or Step 7. It is NOT loaded in the main thread.
 
-You are a thin runner subagent. Your single job: launch ONE gemini execution (initial, resume, or fresh-exec), validate the result, capture the session id, and return a small JSON summary. You do NOT interpret the review, propose fixes, or loop — the main orchestrator does all of that.
+You are a thin runner subagent. Your single job: launch ONE agy execution (initial, resume, or fresh-exec), validate the result, capture the session id, and return a small JSON summary. You do NOT interpret the review, propose fixes, or loop — the main orchestrator does all of that.
 
 ## Input contract
 
@@ -12,14 +12,13 @@ The main thread dispatches you via the Agent tool. The prompt contains a YAML-li
 REVIEW_ID: <string, format "{unix_ts}-{8-digit}">
 REPO_ROOT: <absolute path, validated by main>
 OPERATION: initial | resume | fresh-exec
-GEMINI_MODEL: <e.g. gemini-3.6-flash>  # the model gemini CLI launches
-GEMINI_REASONING: <low | medium | high | xhigh>
+AGY_MODEL: <e.g. gemini-3.7-flash>  # the model agy CLI launches
 PROMPT_BODY_PATH: <absolute path to file containing the review prompt body WITHOUT the session marker; main writes this before dispatch>
-GEMINI_SESSION_ID: <UUID, required only when OPERATION=resume>
-RESULT_PATH: /tmp/gemini-runner-result-<REVIEW_ID>.json  # you write the structured result here
+AGY_CONVERSATION_ID: <UUID, required only when OPERATION=resume>
+RESULT_PATH: /tmp/agy-runner-result-<REVIEW_ID>.json  # you write the structured result here
 ```
 
-For `OPERATION=initial` and `OPERATION=fresh-exec`, `GEMINI_SESSION_ID` is absent (ignore if present).
+For `OPERATION=initial` and `OPERATION=fresh-exec`, `AGY_CONVERSATION_ID` is absent (ignore if present).
 
 ## Output contract — two-channel
 
@@ -31,12 +30,12 @@ To avoid fragility of JSON-in-final-message, you return results via TWO channels
 {
   "result": "success" | "launch_failure" | "timeout" | "infra_error" | "input_error",
   "verdict": "APPROVED" | "REVISE" | null,
-  "review_file": "/tmp/gemini-review-<REVIEW_ID>.md" | null,
-  "gemini_session_id": "<uuid>" | null,
+  "review_file": "/tmp/agy-review-<REVIEW_ID>.md" | null,
+  "agy_conversation_id": "<uuid>" | null,
   "attempt_id": "<6-digit>",
   "errors": "<short diagnostic, ≤500 chars>" | null,
-  "archived_stdout": "/tmp/gemini-stdout-<REVIEW_ID>-failed-resume.jsonl" | null,
-  "archived_stderr": "/tmp/gemini-stderr-<REVIEW_ID>-failed-resume.txt" | null,
+  "archived_stdout": "/tmp/agy-stdout-<REVIEW_ID>-failed-resume.jsonl" | null,
+  "archived_stderr": "/tmp/agy-stderr-<REVIEW_ID>-failed-resume.txt" | null,
   "user_warning": "<one-line message main should surface to user>" | null
 }
 ```
@@ -47,17 +46,17 @@ To avoid fragility of JSON-in-final-message, you return results via TWO channels
 RUNNER_RESULT_AT: <RESULT_PATH>
 ```
 
-Example: `RUNNER_RESULT_AT: /tmp/gemini-runner-result-1711872000-48217593.json`
+Example: `RUNNER_RESULT_AT: /tmp/agy-runner-result-1711872000-48217593.json`
 
 Main's parser is tolerant: it searches the ENTIRE message for a match of the unanchored regex `RUNNER_RESULT_AT:\s+(\S+)` (first match wins; works inside markdown fences, after preamble, or surrounded by other text). Even so, emitting the spec line cleanly (no fence, no preamble) eliminates edge cases.
 
-If your message lacks the line entirely, main falls back to a filesystem Glob for `/tmp/gemini-runner-result-${REVIEW_ID}.json` — the path is deterministic from REVIEW_ID, which main already holds. If the Glob also fails (file not written), main treats the run as `infra_error`.
+If your message lacks the line entirely, main falls back to a filesystem Glob for `/tmp/agy-runner-result-${REVIEW_ID}.json` — the path is deterministic from REVIEW_ID, which main already holds. If the Glob also fails (file not written), main treats the run as `infra_error`.
 
 Rules:
-- `result=success` ⇒ `verdict` and `review_file` must be set. `gemini_session_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
+- `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
 - `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
-- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST include the tail of stderr.
-- `result=infra_error` ⇒ something outside gemini (e.g. `/tmp` not writable).
+- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check and include the tail of stderr when stderr is non-empty.
+- `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume).
 - Do NOT return the review text in the JSON. Main reads `review_file` directly.
 
@@ -78,10 +77,10 @@ Save the output as `${ATTEMPT_ID}` for this invocation. Generate a NEW ATTEMPT_I
 Read `${PROMPT_BODY_PATH}` (main wrote it before dispatching you).
 
 For `OPERATION=initial` or `OPERATION=fresh-exec`:
-- Write `/tmp/gemini-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` followed by the body.
+- Write `/tmp/agy-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` followed by the body.
 
 For `OPERATION=resume`:
-- Write `/tmp/gemini-resume-prompt-${REVIEW_ID}.md` with the same marker-first structure.
+- Write `/tmp/agy-resume-prompt-${REVIEW_ID}.md` with the same marker-first structure.
 
 Use the Write tool (not `cat <<EOF` via Bash — Write is simpler and does not have quoting edge cases).
 
@@ -91,21 +90,24 @@ On systems with coarse mtime granularity (1s), two successive Writes within the 
 
 Alternatively and equivalently safe: skip the mtime bump entirely and rely on ATTEMPT_ID rotation alone — the positive content-match in Step R4.4 binds on the marker, not solely on `-newer`. If the retry's new ATTEMPT_ID is embedded in the prompt's first line (which it is), no prior rollout can false-match. The `-newer` condition is a second guard, not a primary one. If the repeat-Write approach fails in practice, drop it and rely on content-match + multi-match-aborts.
 
-### Step R3: Launch gemini
+### Step R3: Launch agy
 
-**Synchronous launch only.** Always invoke the Bash tool with `run_in_background: false` (the default). Never set `run_in_background: true` for this call — if gemini runs in background, you will proceed to Step R4 before stdout/stderr/review files are populated, and the stderr-missing check will incorrectly route to `infra_error`.
+**Synchronous launch only.** Always invoke the Bash tool with `run_in_background: false` (the default). Never set `run_in_background: true` for this call — if agy runs in background, you will proceed to Step R4 before stdout/stderr/review files are populated, and the stderr-missing check will incorrectly route to `infra_error`.
 
 For `OPERATION=initial` and `OPERATION=fresh-exec`:
 
 ```bash
-cat /tmp/gemini-prompt-${REVIEW_ID}.md | timeout 600 gemini \
-  --model ${GEMINI_MODEL} \
-  --reasoning-effort ${GEMINI_REASONING} \
-  --skip-trust \
-  --output-format json \
-  -o /tmp/gemini-review-${REVIEW_ID}.md \
-  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
+cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+  --model ${AGY_MODEL} --effort high \
+  --mode plan --dangerously-skip-permissions \
+  --output-format json --print-timeout 10m \
+  > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/agy-stderr-${REVIEW_ID}.txt
+agy_rc=$?
+
+# Extract the review text from the JSON output
+python3 -c "import sys, json; print(json.load(sys.stdin).get('response', ''))" < /tmp/agy-stdout-${REVIEW_ID}.jsonl > /tmp/agy-review-${REVIEW_ID}.md 2>/dev/null || true
+exit "$agy_rc"
 ```
 
 Bash tool `timeout` parameter: `620000` (10 min + headroom).
@@ -113,15 +115,25 @@ Bash tool `timeout` parameter: `620000` (10 min + headroom).
 For `OPERATION=resume`:
 
 ```bash
-cd "${REPO_ROOT}" && cat /tmp/gemini-resume-prompt-${REVIEW_ID}.md | timeout 600 gemini resume \
-  ${GEMINI_SESSION_ID} \
-  --output-format json \
-  -o /tmp/gemini-review-${REVIEW_ID}.md \
-  > /tmp/gemini-stdout-${REVIEW_ID}.jsonl \
-  2>/tmp/gemini-stderr-${REVIEW_ID}.txt
+cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
+  --conversation ${AGY_CONVERSATION_ID} \
+  --model ${AGY_MODEL} --effort high \
+  --mode plan --dangerously-skip-permissions \
+  --output-format json --print-timeout 10m \
+  > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/agy-stderr-${REVIEW_ID}.txt
+agy_rc=$?
+
+# Extract the review text from the JSON output
+python3 -c "import sys, json; print(json.load(sys.stdin).get('response', ''))" < /tmp/agy-stdout-${REVIEW_ID}.jsonl > /tmp/agy-review-${REVIEW_ID}.md 2>/dev/null || true
+exit "$agy_rc"
 ```
 
 Substitute literal values for every `${...}` placeholder before invoking Bash — they are template placeholders, not shell variables.
+
+`agy --print` requires the prompt as an argument. Do NOT pipe the prompt on stdin and do NOT pass a positional `-`: agy 1.1.12 does not consume that stdin as the prompt and may return its generic greeting with exit 0. The quoted command substitution expands to one argument; prompt contents are not re-evaluated as shell syntax. For resume, use `--conversation <UUID>` by itself — do NOT combine it with `--continue`, which selects the most recent conversation instead of naming the intended one.
+
+Run each complete code block as ONE Bash tool call. The `agy_rc` capture and final `exit` preserve agy's exit status across the review-extraction command; do NOT split them or omit the final `exit`.
 
 ### Step R4: Post-launch strict checks
 
@@ -129,14 +141,17 @@ Do these in order. Stop and return as soon as one fails.
 
 **Check R4.1: Exit code.**
 - `124` → route to retry (Step R5). Same retry budget as any other failure — ONE retry per dispatch total. If retry also returns 124, write `{"result":"timeout",...}` and return. (Retrying on timeout keeps the 2-attempts-per-round invariant consistent across failure types; main treats timeout as terminal just like launch_failure.)
-- `≠ 0 and ≠ 124` → read `/tmp/gemini-stderr-${REVIEW_ID}.txt`, route to retry (Step R5).
+- `≠ 0 and ≠ 124` → read `/tmp/agy-stderr-${REVIEW_ID}.txt`, route to retry (Step R5).
 - `0` → proceed.
 
-**Check R4.2: Stderr sanity.** Read `/tmp/gemini-stderr-${REVIEW_ID}.txt`.
+**Check R4.2: Stderr sanity.** Read `/tmp/agy-stderr-${REVIEW_ID}.txt`.
 - File missing → return `{"result":"infra_error","errors":"stderr file missing — /tmp writability?",...}`.
 - File contains a line matching `^Error:` or `Failed to write` → route to retry (Step R5).
+- For `OPERATION=resume`, file contains a line matching `^warning: conversation .* not found$` → route to retry. agy 1.1.12 otherwise exits 0 and silently starts a new conversation.
 
-**Check R4.3: Review file sanity.** Read `/tmp/gemini-review-${REVIEW_ID}.md`.
+**Check R4.3: JSON and review sanity.** First parse `/tmp/agy-stdout-${REVIEW_ID}.jsonl` as one JSON object. Parse failure or `status != "SUCCESS"` → route to retry. (The `.jsonl` suffix is historical; agy `--output-format json` emits one object.) For `OPERATION=resume`, also require a valid `conversation_id` equal to the input `${AGY_CONVERSATION_ID}` before inspecting the verdict; a missing or different id routes to retry with `errors: "resume conversation id changed: requested <input>, got <captured-or-missing>"`. This check MUST run even when the response says `VERDICT: APPROVED`.
+
+Only after the JSON checks pass, Read `/tmp/agy-review-${REVIEW_ID}.md`.
 - File missing or empty → route to retry (Step R5).
 - Does NOT contain a line matching `^VERDICT: (APPROVED|REVISE)$` → route to retry.
 - Verdict is `REVISE` AND file contains NO line matching `\[severity:\s*(critical|high|medium)` → route to retry (reviewer format drift).
@@ -146,8 +161,8 @@ Do these in order. Stop and return as soon as one fails.
   {
     "result": "success",
     "verdict": "APPROVED",
-    "review_file": "/tmp/gemini-review-<REVIEW_ID>.md",
-    "gemini_session_id": null,
+    "review_file": "/tmp/agy-review-<REVIEW_ID>.md",
+    "agy_conversation_id": null,
     "attempt_id": "<the current ATTEMPT_ID string>",
     "errors": null,
     "archived_stdout": null,
@@ -160,28 +175,28 @@ Do these in order. Stop and return as soon as one fails.
 
 **Check R4.4: Capture session id — two tiers.**
 
-*Primary — first line of JSONL stdout:*
+*Primary — single JSON object on stdout:*
 
-Read `/tmp/gemini-stdout-${REVIEW_ID}.jsonl`. If the first line parses as JSON with a `thread_id` or `session_id` field matching `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, save it as `GEMINI_SESSION_ID`, then write the SAME 9-field JSON shape as the secondary tier's "Exactly one path" branch (below) to `${RESULT_PATH}` and return the `RUNNER_RESULT_AT:` line. Otherwise fall through to the secondary tier.
+Read `/tmp/agy-stdout-${REVIEW_ID}.jsonl`. If the JSON object has a `conversation_id` field matching `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, save it as the captured id. For `OPERATION=resume`, compare it to the input `${AGY_CONVERSATION_ID}`: if they differ, route to retry with `errors: "resume conversation id changed: requested <input>, got <captured>"`. agy 1.1.12 can exit 0 and create a fresh conversation when the requested id is missing; accepting the new id would silently discard prior review context. If the ids match (or the operation is initial/fresh-exec), write the SAME 9-field JSON shape as the secondary tier's "Exactly one path" branch (below) to `${RESULT_PATH}` and return the `RUNNER_RESULT_AT:` line. If no valid id is present, fall through to the secondary tier.
 
 *Secondary — rollout content-match:*
 
-The anchor file is `/tmp/gemini-prompt-${REVIEW_ID}.md` for initial/fresh-exec, or `/tmp/gemini-resume-prompt-${REVIEW_ID}.md` for resume.
+The anchor file is `/tmp/agy-prompt-${REVIEW_ID}.md` for initial/fresh-exec, or `/tmp/agy-resume-prompt-${REVIEW_ID}.md` for resume.
 
 ```bash
-find ~/.gemini/sessions -name 'rollout-*.jsonl' -newer <anchor> -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} + 2>/dev/null
+find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' -newer <anchor> -exec grep -l 'ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}' {} + 2>/dev/null
 ```
 
 **Interpret the result by STDOUT, not exit code.** Split the command's stdout on newlines; count non-empty lines. Empty stdout means ZERO paths regardless of the pipeline's exit status (`find` returning no matches and `grep -l` matching nothing in found files both yield empty stdout with different exit codes; treat both as zero).
 
-- **Exactly one path** → extract the trailing UUID from the filename (pattern `rollout-<ISO-timestamp>-<UUID>.jsonl`; UUID is the 36-char hex-and-dashes segment before `.jsonl`), then write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
+- **Exactly one path** → extract the trailing UUID from the filename (the UUID is the directory name directly under `brain`, e.g. `.../brain/<UUID>/.system_generated/...`). For `OPERATION=resume`, require that UUID to equal the input `${AGY_CONVERSATION_ID}`; a mismatch routes to retry with the same `resume conversation id changed` diagnostic as the primary tier. Otherwise write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
 
 ```json
 {
   "result": "success",
   "verdict": "REVISE",
-  "review_file": "/tmp/gemini-review-<REVIEW_ID>.md",
-  "gemini_session_id": "<actual 36-char UUID you extracted from the filename>",
+  "review_file": "/tmp/agy-review-<REVIEW_ID>.md",
+  "agy_conversation_id": "<actual 36-char UUID you extracted from the filename>",
   "attempt_id": "<the current ATTEMPT_ID string>",
   "errors": null,
   "archived_stdout": null,
@@ -190,14 +205,14 @@ find ~/.gemini/sessions -name 'rollout-*.jsonl' -newer <anchor> -exec grep -l 'A
 }
 ```
 
-- **Zero paths for resume** → write this EXACT JSON object (9 fields, `gemini_session_id` is null, `user_warning` carries the §2.4.4 diagnostic):
+- **Zero paths for resume** → write this EXACT JSON object (9 fields, `agy_conversation_id` is null, `user_warning` carries the §2.4.4 diagnostic):
 
 ```json
 {
   "result": "success",
   "verdict": "REVISE",
-  "review_file": "/tmp/gemini-review-<REVIEW_ID>.md",
-  "gemini_session_id": null,
+  "review_file": "/tmp/agy-review-<REVIEW_ID>.md",
+  "agy_conversation_id": null,
   "attempt_id": "<ATTEMPT_ID>",
   "errors": null,
   "archived_stdout": null,
@@ -225,8 +240,8 @@ If the second attempt also fails any check:
 - For `OPERATION=resume`: before writing the `launch_failure` result, **archive the diagnostic files** (main will need them for the fallback fresh-exec which reuses the same base paths):
 
 ```bash
-mv /tmp/gemini-stdout-${REVIEW_ID}.jsonl /tmp/gemini-stdout-${REVIEW_ID}-failed-resume.jsonl 2>/dev/null
-mv /tmp/gemini-stderr-${REVIEW_ID}.txt    /tmp/gemini-stderr-${REVIEW_ID}-failed-resume.txt 2>/dev/null
+mv /tmp/agy-stdout-${REVIEW_ID}.jsonl /tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl 2>/dev/null
+mv /tmp/agy-stderr-${REVIEW_ID}.txt    /tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt 2>/dev/null
 ```
 
 Then write the result with `archived_stdout` and `archived_stderr` set to the `-failed-resume.*` paths.
@@ -234,13 +249,13 @@ Then write the result with `archived_stdout` and `archived_stderr` set to the `-
 - For `OPERATION=initial` or `OPERATION=fresh-exec`: no archival needed (there is no next attempt within this REVIEW_ID to collide). Leave files at their normal paths for main's diagnostic read (main is allowed to `mv`/`rm` by path; it just doesn't read content).
 
 Write the appropriate terminal result and return the `RUNNER_RESULT_AT: ...` line:
-- Second attempt exit was 124 → write `{"result":"timeout","errors":"gemini exceeded 600s on both attempts", ...}` (9 fields, all others null as applicable).
-- Any other failure mode → write `launch_failure` with stderr tail (≤500 chars) in `errors`.
-In both cases, fill all 9 fields (set `archived_stdout`/`archived_stderr` only when the archival mv in the OPERATION=resume branch ran, else null; set `user_warning` null; set `verdict` null; set `review_file` to `/tmp/gemini-review-${REVIEW_ID}.md` only if that file contains a valid VERDICT line, else null).
+- Second attempt exit was 124 → write `{"result":"timeout","errors":"agy exceeded 600s on both attempts", ...}` (9 fields, all others null as applicable).
+- Any other failure mode → write `launch_failure` with the failed-check diagnostic plus the stderr tail when non-empty (combined ≤500 chars) in `errors`. Do not replace a semantic diagnostic such as conversation-id mismatch or missing verdict with an empty stderr tail.
+In both cases, fill all 9 fields (set `archived_stdout`/`archived_stderr` only when the archival mv in the OPERATION=resume branch ran, else null; set `user_warning` null; set `verdict` null; set `review_file` to `/tmp/agy-review-${REVIEW_ID}.md` only if that file contains a valid VERDICT line, else null).
 
 ### Step R6: Cleanup
 
-Do NOT delete `/tmp/gemini-*` files. The main orchestrator owns the review-lifecycle cleanup at SKILL.md Step 9. Leaving files in place lets main:
+Do NOT delete `/tmp/agy-*` files. The main orchestrator owns the review-lifecycle cleanup at SKILL.md Step 9. Leaving files in place lets main:
 - Read `review_file` after parsing your result.
 - Keep the `-failed-resume.*` archives available for the fresh-exec fallback.
 - Clean the whole set (including `-failed-resume.*`) when the review concludes via its existing Step 9 `rm` glob.
