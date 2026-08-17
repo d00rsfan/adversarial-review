@@ -76,6 +76,21 @@ Save the output as `${ATTEMPT_ID}` for this invocation. Generate a NEW ATTEMPT_I
 
 Read `${PROMPT_BODY_PATH}` (main wrote it before dispatching you).
 
+**Fail-closed static-review policy check.** Before writing a launch prompt or
+calling agy, require the body to contain exactly one `<review_method>` opening
+tag, exactly one `</review_method>` closing tag, and all three literal anchors
+below:
+
+- `Perform a static review only.`
+- `Do NOT execute any command whose purpose is to verify, build, or run the project.`
+- `Do not add a Verification section or report commands/checks as if you performed`
+
+If either tag or any anchor is missing, or if either tag occurs more than once,
+write an `input_error` result with
+`errors: "prompt body is missing or duplicates the required static-review policy"`
+and return the `RUNNER_RESULT_AT:` line. Do NOT reconstruct the policy, launch
+agy, or retry. This check applies to initial, fresh-exec, and resume operations.
+
 For `OPERATION=initial` or `OPERATION=fresh-exec`:
 - Write `/tmp/agy-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` followed by the body.
 

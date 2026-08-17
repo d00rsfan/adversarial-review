@@ -21,6 +21,9 @@ teach OpenAI Codex how to run adversarial reviews through Antigravity CLI (agy)
   mistakes, missing steps, and risks early
 - **Code review** — review the implementation. Bugs, security, data loss
 - **Code-vs-plan** — verify the implementation matches the plan
+- **Static-only reviewer** — Antigravity reads diffs and source, searches
+  references, and traces code paths, but does not build, compile, test, lint,
+  format, install dependencies, or run project code
 - **Iterative** — Codex fixes issues based on reviewer feedback and resubmits
   for re-review. Up to 5 rounds until approved
 - **Lightweight** — `SKILL.md` + one `references/runner.md` (thin runner
@@ -173,15 +176,22 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 
 </details>
 
-**Security note:** The `agy` rule allows any `agy` invocation
-wrapped in `timeout 600`. The skill passes `--mode plan`, and every reviewer
-prompt explicitly prohibits file changes. It also passes
-`--dangerously-skip-permissions` because headless agy cannot interactively
-approve the commands needed to inspect a repository. This flag auto-approves
-agy tool calls, so use the skill only on repositories you trust,
-but Codex's permission patterns are prefix-based and cannot enforce flag
-constraints. If you prefer tighter control, omit the `agy` rule and
-approve each invocation manually.
+**Security note:** The `agy` rule allows any `agy` invocation wrapped in
+`timeout 600`. The skill passes `--mode plan`, and every initial, fresh, and
+resume prompt explicitly prohibits file changes and project verification.
+Antigravity may use only the supplied read-only `git diff` commands plus file
+read/search operations; it must not run builds, compilation, tests, lint,
+formatting, dependency operations, generators, migrations, project scripts,
+applications, services, or containers. Repository-local instructions cannot
+override this policy.
+
+The runner also passes `--dangerously-skip-permissions` because headless agy
+cannot interactively approve the `git diff` commands needed to inspect a
+repository. This flag auto-approves agy tool calls, so the static-only boundary
+is prompt-enforced rather than an OS command allowlist. Use the skill only on
+repositories you trust. Codex's permission patterns are prefix-based and
+cannot enforce flag constraints. If you prefer tighter control, omit the `agy`
+rule and approve each invocation manually.
 
 ### 4. Use
 
@@ -199,6 +209,8 @@ The skill uses XML-structured prompts with adversarial stance:
 
 - **`<role>`** — adversarial reviewer, defaults to skepticism
 - **`<operating_stance>`** — break confidence, not validate
+- **`<review_method>`** — static inspection only; no builds, compilation,
+  tests, project checks, or `Verification` report
 - **`<attack_surface>`** — concrete checklist: auth, data integrity,
   race conditions, rollback safety, schema drift, error handling, observability
 - **`<finding_bar>`** — every finding must answer 4 questions:
@@ -277,10 +289,13 @@ review correctness.
 - **Plan Mode and `/tmp` writes.** Writing review prompts to `/tmp` may trigger
   a permission prompt or cause Plan Mode to exit. Does not affect review correctness.
 - **Headless agy tool approvals.** The runner uses `--mode plan` and explicit
-  no-write prompts, but must also use `--dangerously-skip-permissions` so agy
-  can run repository-inspection commands without an interactive prompt. Treat
-  reviewed repositories as trusted input. agy 1.1.12's `--sandbox` is not used
-  because repeated real-diff runs ended with sandbox-server connection resets.
+  no-write/static-only prompts, but must also use
+  `--dangerously-skip-permissions` so agy can run the supplied `git diff`
+  commands without an interactive prompt. The ban on builds, tests, and other
+  project execution is therefore prompt-enforced, not an OS-level command
+  boundary. Treat reviewed repositories as trusted input. agy 1.1.12's
+  `--sandbox` is not used because repeated real-diff runs ended with
+  sandbox-server connection resets.
 - **Explicit conversation resume has no cwd flag.** The skill captures
   `REPO_ROOT` via `git rev-parse --show-toplevel` at Step 2 and prefixes
   every initial, fresh, and `--conversation` launch with

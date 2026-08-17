@@ -265,11 +265,15 @@ application success.
   event stream is actually wanted (the skill does not).
 - `--print-timeout` defaults to 5 minutes, so the runner sets `10m` to align
   it with the outer `timeout 600` guard.
-- Reviewer intent is constrained with `--mode plan` and an explicit no-write
-  instruction in every review prompt.
+- Reviewer intent is constrained with `--mode plan` and an explicit no-write,
+  static-review-only instruction in every initial, fresh, and resume prompt.
+  Plan mode does not by itself prohibit shell commands: the prompt separately
+  limits evidence gathering to the supplied read-only `git diff` commands plus
+  file read/search and forbids builds, compilation, tests, and other project
+  execution.
   `--dangerously-skip-permissions` is also required because headless agy cannot
-  prompt to approve `git diff` and other inspection commands; auto-approval is
-  therefore bounded by plan mode and the reviewer prompt. agy 1.1.12's
+  prompt to approve the supplied `git diff` commands; auto-approval is
+  therefore bounded by the reviewer prompt. agy 1.1.12's
   `--sandbox` is not used because repeated real-diff runs ended with
   `status=ERROR` and a sandbox-server connection reset (§9.7).
 
@@ -653,6 +657,49 @@ Each decision below follows the same template:
   is subject to the OS argv-size limit. After agy returns, the runner saves
   `$?` as `agy_rc`, extracts `.response`, and exits with `agy_rc`; without
   that explicit preservation, the extraction command would mask agy's exit.
+
+### §4.14. Static-only reviewer execution boundary
+
+- **Decision.** Every initial, fresh-exec, and resume prompt contains the same
+  `<review_method>` block: Antigravity may obtain the supplied diffs, read and
+  search repository files, and trace code/data/control flow, but must not run
+  repository-hygiene checks, builds, compilation, tests, linting, formatting,
+  dependency operations, generators, migrations, project scripts,
+  applications, services, or containers. The runner fails closed before launch
+  if the policy block or its required anchors are missing or duplicated.
+- **Where in SKILL.md.** Step 4's plan/code prompt templates, Step 7.1's resume
+  template, and the Rules summary. Fresh-exec reconstructs the original Step 4
+  prompt, so it inherits the same block. `references/runner.md` Step R2 performs
+  the mechanical pre-launch check.
+- **Context.** The former `Operate read-only` rule prevented source edits but
+  did not distinguish static review from verification. A real review report
+  included `git status --short --branch`, `git diff --check`, three Maven/JUnit
+  executions, and `mvn test-compile`. Only diff inspection, source search, and
+  static path tracing contributed to the reviewer role; the rest duplicated the
+  implementation agent's verification work and consumed substantial time.
+  Repository-local instructions can also tell an agent to run tests, so the
+  reviewer policy must explicitly take precedence over them.
+- **Alternatives considered.**
+  - *Keep only `Operate read-only`.* Rejected: builds and tests can leave source
+    files untouched and were therefore treated as compatible with that wording.
+  - *Rely on `--mode plan`.* Rejected: execution mode does not provide a
+    semantic allowlist for shell commands.
+  - *Remove `--dangerously-skip-permissions`.* Rejected for the current
+    transport: agy 1.1.12 then auto-denied the required `git diff` and returned
+    a useless empty response (§9.7).
+  - *Use `--sandbox` as the command boundary.* Rejected: it does not express
+    “allow diff/search but deny test/build,” and the 1.1.12 sandbox was unstable
+    on real-diff reviews (§9.7).
+- **Chosen because.** The allowlist of review activities, detailed deny list,
+  explicit precedence over repository instructions, no-`Verification` output
+  rule, repetition on resume, and runner preflight check jointly address both
+  the observed behavior and likely aliases/wrappers without coupling the skill
+  to Maven alone.
+- **Trade-offs accepted.** Command classification remains prompt-enforced
+  inside agy rather than an OS-level per-process allowlist. The runner guarantees
+  that the policy reaches every launch, but a future agy release with a portable
+  per-run command allowlist would provide stronger enforcement and should be
+  preferred after re-running §7.
 
 ---
 
@@ -1100,6 +1147,18 @@ if rg -n 'cat .*\|.*agy --print -|--continue --conversation' references/runner.m
   echo "obsolete agy transport found" >&2
   exit 1
 fi
+
+# Every launch path must carry the static-review policy. Expect all tests below
+# to exit 0 (plan template + code template + resume template = 3).
+test "$(rg -c '^<review_method>$' SKILL.md)" -eq 3
+test "$(rg -c '^</review_method>$' SKILL.md)" -eq 3
+test "$(rg -c '^Perform a static review only\.$' SKILL.md)" -eq 3
+test "$(rg -c '^Do NOT execute any command whose purpose is to verify, build, or run the project\.$' SKILL.md)" -eq 3
+test "$(rg -c '^Do not add a Verification section or report commands/checks as if you performed$' SKILL.md)" -eq 3
+
+# Runner must fail closed rather than launch agy without the policy.
+rg -n 'prompt body is missing or duplicates the required static-review policy' references/runner.md
+# expect: exactly one line
 ```
 
 ### §7.6. Cleanup smoke artifacts
@@ -1228,7 +1287,12 @@ Headless agy cannot prompt for command-tool approval. Without an allow rule or
 `--dangerously-skip-permissions`, a real code review returns `SUCCESS` with an
 empty response after `git diff` is auto-denied. The portable runner therefore
 uses `--dangerously-skip-permissions` together with `--mode plan` and explicit
-no-write reviewer instructions.
+no-write/static-only reviewer instructions. Those instructions allow only the
+supplied `git diff` commands and file read/search operations; they explicitly
+prohibit repository-hygiene checks, builds, compilation, tests, and all other
+project execution, override repository-local verification instructions, and
+suppress a `Verification` report section. Runner Step R2 fails closed before
+invoking agy if that policy is missing or duplicated.
 
 The stronger-looking `--sandbox` flag was tested twice on the real repository
 diff. Both runs produced a complete verdict but set JSON `status=ERROR` with
@@ -1237,9 +1301,11 @@ strict status check correctly rejected them. Until agy's sandbox is stable in
 the target environment, it is not usable for this skill.
 
 Trade-off: plan mode and prompt constraints are model/CLI enforcement rather
-than an OS-level read-only mount. Use the skill only on trusted repositories.
-Re-test `--sandbox` after agy upgrades; restoring it is preferred once §7
-passes with `status=SUCCESS` on a review that executes repository commands.
+than an OS-level read-only mount or command allowlist. The runner guarantees
+policy delivery, not model compliance. Use the skill only on trusted
+repositories. Re-test `--sandbox` after agy upgrades; restoring it is preferred
+once §7 passes with `status=SUCCESS` on a review that executes only the allowed
+static-inspection commands.
 
 ---
 
