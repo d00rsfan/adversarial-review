@@ -11,9 +11,10 @@ Adversarial review does the opposite: the reviewer **defaults to skepticism**
 and tries to break confidence in the change. It looks for what will fail
 in production, not what might be nice to improve.
 
-This is a Codex skill — a `SKILL.md` file plus a small `references/runner.md` that together
-teach OpenAI Codex how to run adversarial reviews through Antigravity CLI (agy)
-(model `gemini-3.7-flash`, reasoning effort `high`).
+This is a Codex skill — `SKILL.md`, a small `references/runner.md`, and a
+standard-library Python contract validator that together teach OpenAI Codex how
+to run adversarial reviews through Antigravity CLI (agy) (model
+`gemini-3.7-flash`, reasoning effort `high`).
 
 ## Key features
 
@@ -26,8 +27,9 @@ teach OpenAI Codex how to run adversarial reviews through Antigravity CLI (agy)
   format, install dependencies, or run project code
 - **Iterative** — Codex fixes issues based on reviewer feedback and resubmits
   for re-review. Up to 5 rounds until approved
-- **Lightweight** — `SKILL.md` + one `references/runner.md` (thin runner
-  subagent spec), no server, no broker, no external runtime deps.
+- **Lightweight** — instruction file, thin runner subagent spec, and a
+  standard-library-only Python helper; no server, broker, or third-party Python
+  packages.
 
 ## How it works
 
@@ -59,14 +61,17 @@ Mode is auto-detected from context, or you can force it with an argument.
 
 ### 1. Prerequisites
 
-[OpenAI Codex CLI](https://github.com/openai/codex) and
-[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`) must be installed.
+[OpenAI Codex CLI](https://github.com/openai/codex),
+[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`), and Python
+3.10 or newer must be installed. The validator uses only Python's standard
+library.
 
-Verify both are available:
+Verify all three are available:
 
 ```bash
 codex --version  # OpenAI Codex CLI
 agy --version    # Antigravity CLI
+python3 --version  # Python 3.10+
 ```
 
 **Authentication.** Antigravity needs API credentials. Either set `GEMINI_API_KEY` env var or sign in via Antigravity CLI.
@@ -80,11 +85,14 @@ mkdir -p ~/.codex/skills
 ln -sfn "$(pwd)" ~/.codex/skills/adversarial-review
 ```
 
-Verify both the skill entry-point AND the runner subagent spec are in place:
+Verify the skill entry point, runner spec, and executable contract helper are
+all in place:
 
 ```bash
 ls -la ~/.codex/skills/adversarial-review/SKILL.md
 ls -la ~/.codex/skills/adversarial-review/references/runner.md
+ls -la ~/.codex/skills/adversarial-review/scripts/runner_contract.py
+python3 ~/.codex/skills/adversarial-review/scripts/runner_contract.py --help
 ```
 
 > **Migrating from a previous install at `~/.claude/skills/` or `~/.agents/skills/`**: delete
@@ -93,7 +101,8 @@ ls -la ~/.codex/skills/adversarial-review/references/runner.md
 
 ### 3. Add permissions
 
-The skill runs `git`, `agy`, and writes temp files to `/tmp`.
+The skill runs `git`, `agy`, the installed standard-library Python helper, and
+writes temp files to `/tmp`.
 Without pre-approved permissions, Codex will prompt for each action.
 
 Permissions should go into `~/.codex/settings.json` (global) or project settings:
@@ -129,10 +138,16 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 "Bash(rm -f /tmp/agy-*)",
 // Main thread: write prompt body for the runner subagent
 "Write(/tmp/agy-body-*)",
+"Write(/tmp/agy-original-body-*)",
+"Write(/tmp/agy-resume-body-*)",
 // Main thread: read the structured JSON result returned by the runner
 "Read(/tmp/agy-runner-result-*)",
 // Runner subagent (inherited): read the prompt body main wrote
 "Read(/tmp/agy-body-*)",
+"Read(/tmp/agy-original-body-*)",
+"Read(/tmp/agy-resume-body-*)",
+// Runner subagent: deterministic prompt/recovery contract
+"Bash(python3 *adversarial-review/scripts/runner_contract.py*)",
 // Runner subagent (inherited): write the result JSON main reads
 "Write(/tmp/agy-runner-result-*)",
 // Runner-spec discovery
@@ -168,8 +183,13 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
       "Bash(mv /tmp/agy-stderr-* /tmp/agy-stderr-*-failed-resume.txt)",
       "Bash(rm -f /tmp/agy-*)",
       "Write(/tmp/agy-body-*)",
+      "Write(/tmp/agy-original-body-*)",
+      "Write(/tmp/agy-resume-body-*)",
       "Read(/tmp/agy-runner-result-*)",
       "Read(/tmp/agy-body-*)",
+      "Read(/tmp/agy-original-body-*)",
+      "Read(/tmp/agy-resume-body-*)",
+      "Bash(python3 *adversarial-review/scripts/runner_contract.py*)",
       "Write(/tmp/agy-runner-result-*)",
       "Bash(ls ~/.codex/skills/adversarial-review/references/runner.md*)",
       "Bash(ls ~/.codex/plugins/cache/*/*/*/skills/adversarial-review/references/runner.md*)"
@@ -255,6 +275,18 @@ unchanged, the conversation ID matches, the recovery response has a valid
 verdict, and the marker-bound recovery turn has no new transcript error. A
 one-line warning is shown before the recovered review.
 
+**Antigravity returns a valid review together with a missing-file ERROR.**
+agy 1.1.14 may retain a recovered `view_file` ENOENT as top-level
+`status: ERROR` even after the current turn ends with a complete verdict. The
+runner accepts only the exact read-only, repository-local missing-file form,
+and only on exit 0 when deterministic checks prove canonical containment, that
+neither the immutable original task nor the current prompt required the missing
+path, and a later successful read recovered a different repository path with
+the same filename. The attempt marker,
+conversation ID, semantic verdict, and final transcript response must also
+match with no later transcript error. It shows a one-line warning. Other tool
+errors and arbitrary `ERROR` responses still fail closed.
+
 **Resume fails with session error.**
 The skill uses `agy --conversation <conversation-id>` for rounds 2+. On failure
 (non-zero exit, missing-conversation warning, changed conversation id, or a malformed review),
@@ -313,11 +345,14 @@ review correctness.
   `--sandbox` is not used because repeated real-diff runs ended with
   sandbox-server connection resets.
 - **Explicit conversation resume has no cwd flag.** The skill captures
-  `REPO_ROOT` via `git rev-parse --show-toplevel` at Step 2 and prefixes
-  every initial, fresh, and `--conversation` launch with
-  `cd '<REPO_ROOT>' && ...`. This requires paths without single quotes;
-  pathological paths (containing `'`, `"`, `$`, backtick, newline) cause
-  the skill to abort at Step 2.
+  `REPO_ROOT` via `git rev-parse --show-toplevel`, prefixes every launch with
+  `cd '<REPO_ROOT>' &&`, registers it with `--add-dir`, supplies it in the
+  reviewer prompt, pins diff commands with `git -C`, and uses absolute paths
+  for repository file tools. The layered binding is necessary because agy
+  1.1.14 can give its native command tool a scratch cwd despite the process
+  `cd`. This requires paths without single quotes; pathological paths
+  (containing `'`, `"`, `$`, backtick, newline) cause the skill to abort at
+  Step 2.
 - **Submodule scoping.** When invoked inside a submodule, the review is
   scoped to the submodule — `git rev-parse --show-toplevel` does not walk
   up to the parent. A warning is printed; invoke from the parent repo if
@@ -344,8 +379,8 @@ checklist, finding bar, calibration rules.
 What we did differently:
 - **Iterative loop** — Codex fixes issues and resubmits (not "stop and ask user")
 - **Plan review** — reviews plans before code, not just code
-- **Minimal install** — `SKILL.md` + one `references/runner.md`, no
-  server, no broker, vs 15+ JS modules
+- **Minimal install** — `SKILL.md`, one runner spec, and one
+  standard-library Python validator; no server or broker, vs 15+ JS modules
 - **Verbatim output** — reviewer findings shown as-is, not rephrased
 
 ## License

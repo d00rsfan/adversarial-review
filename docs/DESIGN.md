@@ -131,9 +131,10 @@ this document exists to manage.
 
 ## §2. Antigravity CLI empirical facts (verified on v1.1.12 and v1.1.14)
 
-The transport contract was verified on `agy 1.1.12` on 2026-08-13 and the
-interrupted-stream behavior was re-verified on `agy 1.1.14` on 2026-08-18
-(see `§8. Version and verification log`). The prior text in this section was
+The transport contract was verified on `agy 1.1.12` on 2026-08-13. The
+interrupted-stream behavior and completed-review/missing-file behavior were
+re-verified on `agy 1.1.14` on 2026-08-18 (see
+`§8. Version and verification log`). The prior text in this section was
 mechanically inherited from Codex CLI 0.121.0 during the agy migration;
 those Codex-specific flags and stream semantics were never valid agy facts.
 Re-run `§7` after upgrading agy.
@@ -199,6 +200,17 @@ the envelope still reported the earlier `ERROR`. Therefore status alone is
 strict for ordinary launches but cannot prove that a marker-bound recovery turn
 failed; §4.15 defines the narrow transcript guard used for that one case.
 
+agy 1.1.14 can also return exit 0 with `status=ERROR`, a complete non-empty
+review response, and a valid UUID after the model recovers from a read-only
+`view_file` call for a nonexistent path. Review `1787067240-58420371` did this
+after guessing `<repo>/package.json`; the actual frontend manifest was nested.
+Its marker-bound transcript ended in `PLANNER_RESPONSE/DONE` whose content
+exactly matched the JSON response and contained `VERDICT: APPROVED`, while the
+envelope retained the earlier `invalid_args`/`no such file or directory`
+diagnostic. §4.16 defines the only allowlisted completed-turn guard for this
+separate signature. The guard is implemented as deterministic code in
+`scripts/runner_contract.py`, not as reviewer judgment.
+
 **Superseded migration assumptions:** ~~`--json` emits `thread.started`
 JSONL events~~ and ~~`-o FILE` stores the final response.~~ Those were Codex
 CLI behaviors. agy uses `--output-format json`, the field is
@@ -238,9 +250,14 @@ conversation rather than binding the command to the id captured by this
 review. That is sufficient reason to exclude it from the skill, independent
 of any cwd filtering details.
 
-**§2.4.2. cwd comes from the process.** agy 1.1.12 has no `-C` / `--cd`
-flag. The runner prefixes initial, fresh-exec, and explicit-resume launches
-with `cd "${REPO_ROOT}" &&` so all rounds inspect the same repository.
+**§2.4.2. Process cwd does not fully bind native tool cwd.** agy 1.1.14 has no
+`-C` / `--cd` flag. Even when the runner launched after
+`cd "${REPO_ROOT}"`, review `1787067240-58420371` gave the first native
+`run_command` call `Cwd=~/.gemini/antigravity-cli/scratch`; its relative
+`git diff` failed before the model rediscovered the repository. The runner now
+keeps the `cd` prefix, adds `--add-dir "${REPO_ROOT}"`, supplies an explicit
+absolute repository context, and requires reviewer diff commands to use
+`git -C "${REPO_ROOT}"`. File reads/searches use absolute rooted paths.
 
 **§2.4.3. Bad UUID silently creates a conversation.** On 1.1.12 a nonexistent
 id passed through `--conversation` writes `warning: conversation "..." not
@@ -266,6 +283,7 @@ every successful REVISE response so a future rotation cannot silently drift.
 | Missing `--conversation` UUID | 0 observed | SUCCESS JSON with a new UUID | warning | rejected by warning/id equality |
 | 1.1.14 interrupted model stream | 1 observed | ERROR JSON, empty response, valid UUID | empty observed | marker-bound conversation recovery uses the one retry |
 | Clean turn after an interrupted 1.1.14 conversation | 0 observed | complete response but sticky ERROR/error | empty observed | accepted only by §4.15's current-turn transcript guard |
+| Recovered read-only `view_file` ENOENT | 0 observed | complete response plus ERROR/invalid_args and valid UUID | empty observed | accepted only by §4.16's marker-bound completed-turn guard and warning |
 | Malformed JSON or empty response | may be 0 | malformed/empty | may be empty | empty review; rejected |
 
 The semantic verdict check remains mandatory even after exit 0 because the
@@ -275,7 +293,9 @@ application success.
 ### §2.6. CLI gaps relevant to the skill
 
 - No prompt-file or documented stdin-prompt mode in agy 1.1.12 or 1.1.14.
-- No cwd flag; use an explicit `cd` prefix.
+- No cwd flag. Use the `cd` prefix for the process, `--add-dir` for workspace
+  registration, `git -C` for every supplied diff command, and absolute paths
+  for file reads/searches. Process cwd alone is insufficient on 1.1.14.
 - `--output-format json` is a single object; use `stream-json` only when an
   event stream is actually wanted (the skill does not).
 - `--print-timeout` defaults to 5 minutes, so the runner sets `10m` to align
@@ -414,18 +434,27 @@ Each decision below follows the same template:
   bare repos with a clear message and warns on submodules (see
   `SKILL.md` Step 2).
 
-### §4.3. Uniform cwd pinning with a `cd` prefix
+### §4.3. Bind process, workspace, commands, and file paths to `REPO_ROOT`
 
 - **Decision.** Prefix every initial, fresh-exec, and resume call with
-  `cd "${REPO_ROOT}" &&`; agy 1.1.12 has no cwd flag.
-- **Where in SKILL.md.** Steps 4 and 7 via runner R3.
-- **Context.** The runner's ambient cwd is not a stable API and all rounds
-  must inspect the same repository.
+  `cd "${REPO_ROOT}" &&`, pass `--add-dir "${REPO_ROOT}"`, include the
+  absolute root in every prompt, require every supplied diff command to use
+  `git -C "${REPO_ROOT}"`, and instruct file tools to use absolute rooted
+  paths. agy 1.1.14 has no cwd flag and its native command tool can otherwise
+  start in the CLI scratch directory.
+- **Where in SKILL.md.** Steps 3–4 and 7; runner R2–R3.
+- **Context.** The runner's ambient cwd and agy's native tool cwd are separate
+  concerns. All rounds must inspect the same repository without spending a
+  model turn rediscovering it.
 - **Alternatives considered.** *Rely on ambient cwd.* Rejected: §3.1.
-- **Chosen because.** One command shape covers every operation and matches
-  the current CLI surface.
-- **Trade-offs accepted.** The repository path is inserted into shell
-  syntax, so Step 2 rejects unsafe path characters.
+  *Use only the process `cd` prefix.* Rejected after review
+  `1787067240-58420371`; retained as historical context in §5.8.
+- **Chosen because.** Each layer has an explicit root binding, while
+  `git -C` makes the permitted diff commands correct even if the native tool's
+  `Cwd` remains scratch.
+- **Trade-offs accepted.** The repository path is inserted into shell syntax
+  and prompt text, so Step 2 rejects unsafe path characters. `--add-dir` is
+  defense in depth; correctness of diff commands does not depend on it.
 
 ### §4.4. Conditional `AGY_CONVERSATION_ID` update (only on full success)
 
@@ -476,7 +505,12 @@ Each decision below follows the same template:
   reconstructs the "previous rounds" section of the prompt from the
   conversation — the round-1 review, round-1 fixes, round-2 review,
   round-2 fixes, etc. — which were already shown verbatim to the user
-  in earlier Step 5 outputs.
+  in earlier Step 5 outputs. Every original template places a review-scoped
+  `ADVERSARIAL-REVIEW-CONTRACT` boundary before task content. The helper
+  validates only the trusted prefix before its first occurrence, so quoted
+  policy/context tags or quoted later copies in verbatim history cannot cause
+  a false input error; the runtime review id prevents pre-boundary artifact
+  text from spoofing it.
 - **Where in SKILL.md.** Step 7 fallback prompt template.
 - **Context.** The extracted file at `/tmp/agy-review-${REVIEW_ID}.md` is
   overwritten on every round. Round-1 review content is gone from disk
@@ -523,12 +557,14 @@ Each decision below follows the same template:
 - **Decision.** After every fresh or `--conversation` agy call,
   checks run in a fixed order:
   1. Opportunistically parse JSON fields for diagnostics and the exact §4.15
-     interrupted-stream classification; this never accepts a review.
+     interrupted-stream and §4.16 read-only missing-file classifications;
+     neither classification alone accepts a review.
   2. Exit code.
   3. Stderr file (even on exit 0).
   4. Strict JSON parse, status, and requested-id equality on resume. Ordinary
      launches still require `status=SUCCESS`; only §4.15's marker-bound
-     recovery can pass with a sticky prior `ERROR`.
+     interrupted recovery and §4.16's allowlisted completed-turn guard can
+     pass with `ERROR`.
   5. Extracted review file semantic sanity.
   6. Conversation-id capture (two-tier, `§4.1`). In Step 4 this is skipped
      on `VERDICT: APPROVED` — no resume will happen, so no session
@@ -537,10 +573,11 @@ Each decision below follows the same template:
      APPROVED.
 - **Where in SKILL.md.** Steps 4 and 7 post-launch.
 - **Context.** Non-zero exit implies the JSON response may not exist, but agy
-  1.1.14 demonstrated that it can also carry the only useful diagnostic UUID
-  and error in a parseable JSON object while stderr is empty. Parsing that
-  envelope before the exit check preserves diagnostics without weakening the
-  acceptance checks. Exit 0 still does not imply
+  1.1.14 demonstrated that it can also carry the only useful diagnostic UUID,
+  error, and sometimes a completed response in a parseable JSON object while
+  stderr is empty. Parsing that envelope before the exit check preserves
+  diagnostics without weakening the marker-bound acceptance checks. Exit 0
+  still does not imply
   that agy applied the prompt (§2.5). Review sanity before id capture keeps the
   two concerns orthogonal: a broken review aborts on its own merits,
   and a valid APPROVED review completes without depending on
@@ -747,7 +784,8 @@ Each decision below follows the same template:
   marker contain no `ERROR_MESSAGE` and end in a completed
   `PLANNER_RESPONSE` equal to the JSON response after stripping trailing CR/LF
   from both values (agy adds one trailing newline to JSON). Surface a warning.
-  Every other non-`SUCCESS` result remains a launch failure.
+  Every other non-`SUCCESS` result remains a launch failure except the separate
+  §4.16 completed-review/missing-file signature.
 - **Where.** `references/runner.md` R4.0–R5; the main thread only receives the
   normal result JSON and optional `user_warning`.
 - **Context.** Review `1787048123-58310427` failed twice because both retry
@@ -767,6 +805,47 @@ Each decision below follows the same template:
 - **Trade-offs accepted.** The recovery depends on agy's persisted transcript
   schema. Schema drift fails closed and leaves the JSON/transcript diagnostic
   in the runner rather than accepting an uncertain review.
+
+### §4.16. Marker-bound completion after a read-only missing-file error
+
+- **Decision.** Permit a non-`SUCCESS` completed review only when the error is
+  the exact agy 1.1.14 permission-conversion form for `view_file`, is
+  `invalid_args`, ends in `no such file or directory`, and names a path below
+  `REPO_ROOT`. Require exit 0; canonical containment with no `.`/`..` path
+  traversal; proof that the failed path was not supplied by the trusted task
+  header; an immutable initial-prompt copy so resume/fresh-exec cannot lose
+  that proof; rejection when either the original or current prompt supplies the
+  path; a later marker-bound `PLANNER_RESPONSE/DONE` containing exactly one
+  tool call, structurally parsed as `name=view_file` with a different
+  repository-local `args.AbsolutePath` of the same basename, immediately
+  followed by the empirical non-empty `GENERIC/DONE` result; a
+  non-empty response; valid
+  UUID and resume equality; normal verdict/finding checks; no subsequent
+  transcript `ERROR_MESSAGE`; and a final `PLANNER_RESPONSE/DONE` whose content
+  exactly equals the returned response after trimming trailing CR/LF. Surface
+  a warning.
+- **Where.** `references/runner.md` R4.0–R4.3 delegates the security-critical
+  predicate to `scripts/runner_contract.py`; deterministic negative fixtures
+  live in `scripts/test_runner_contract.py`.
+- **Context.** Review `1787067240-58420371` inspected the complete task diff,
+  recovered from guessing a nonexistent root `package.json`, found the nested
+  manifest, and ended with `VERDICT: APPROVED`. agy nevertheless retained the
+  recovered read failure as top-level `status=ERROR`, so the runner discarded
+  a semantically and transcript-complete review.
+- **Alternatives considered.** Accept any non-empty response under `ERROR` was
+  rejected because permission, command, sandbox, and partial-agent failures can
+  produce plausible text. Reject every such response was the previous
+  fail-closed rule, but it causes false launch failures for a fully completed
+  marker-bound turn. Retrying first was rejected because it spends the bounded
+  retry and can reproduce the same harmless discovery miss.
+- **Chosen because.** The allowlist is narrower than the observed failure:
+  exit 0 only, read-only tool only, canonical repository-local auxiliary path,
+  positive proof of recovery through the same filename, exact current-turn
+  transcript completion, normal semantic review validation, and a visible
+  warning.
+- **Trade-offs accepted.** Changes in agy's error wording fail closed until
+  re-verified. The guard intentionally does not cover failed commands, writes,
+  permission denials, paths outside the repository, or other tools.
 
 ---
 
@@ -837,6 +916,17 @@ Rejected after agy 1.1.12 returned exit 0, empty stderr, and a generic greeting
 instead of applying the prompt. `-` is not a documented stdin sentinel for agy.
 Replaced by the quoted one-argument form in §4.13.
 
+### §5.8. Process `cd` as the only repository binding
+
+The original agy design prefixed every launch with
+`cd "${REPO_ROOT}" &&` and assumed native tools inherited that cwd.
+
+Rejected after agy 1.1.14 review `1787067240-58420371`: the CLI process was
+started in the repository, but the first native `run_command` tool call used
+`~/.gemini/antigravity-cli/scratch` and its relative diff failed. The `cd`
+prefix remains useful but is no longer the sole control. §4.3 adds
+`--add-dir`, root-pinned `git -C` commands, and absolute file paths.
+
 ---
 
 ## §6. Prior diagnostic errors and lessons
@@ -848,9 +938,9 @@ here as a lesson, not as blame.
 
 Sections §6.1–§6.8 are legacy records from the pre-agy reviewer backend.
 Their mechanically migrated command names are superseded and must not be used
-as current agy syntax; current facts begin in §2 and the agy-specific incident
-is §6.9. The records remain because §10.2 requires preserving the reasoning
-behind attempt-scoped transcript binding and fail-closed behavior.
+as current agy syntax; current facts begin in §2 and the agy-specific incidents
+are §§6.9–6.11. The records remain because §10.2 requires preserving the
+reasoning behind attempt-scoped transcript binding and fail-closed behavior.
 
 ### §6.1. "Codex stderr is 0 bytes — no `session id:` line is printed"
 
@@ -1101,6 +1191,38 @@ transcript guards, with a user-visible warning.
 succeeds. Preserve fail-closed defaults, but validate the current turn directly
 when the transport exposes a stable conversation identity and transcript.
 
+### §6.11. 2026-08-18: scratch cwd and recovered ENOENT caused a false failure
+
+**Report.** Review `1787067240-58420371` of Bug #9179 returned a complete
+`VERDICT: APPROVED`, yet the runner reported `launch_failure`. The JSON envelope
+had `status=ERROR` because the reviewer first guessed
+`/home/lena/pets/g/package.json`, which does not exist; the frontend manifest is
+nested at `src/main/frontend/package.json`.
+
+**Verification.** The marker-bound transcript showed two independent issues.
+The first supplied relative `git diff` ran with native-tool
+`Cwd=/home/lena/.gemini/antigravity-cli/scratch` even though runner R3 had
+already changed the CLI process directory to `/home/lena/pets/g`. The model
+found the repository and reran both diffs successfully. Later `view_file` on
+the guessed root manifest failed with `invalid_args`/ENOENT; the model recovered,
+found the nested manifest, completed its static trace, and ended in a
+`PLANNER_RESPONSE/DONE` exactly equal to the JSON response. No transcript
+`ERROR_MESSAGE` followed the current marker. agy 1.1.14 nevertheless returned
+exit 0 with the recovered read error retained as top-level `status=ERROR`.
+
+**Mitigation.** §4.3 binds the repository at four layers: process `cd`,
+`--add-dir`, prompt repository context, and root-pinned `git -C`/absolute file
+paths. The prompt tells the reviewer to locate unsupplied manifests before
+reading them and to avoid verification-only exploration. §4.16 accepts only
+the exact exit-0, marker-bound, canonically repository-local, auxiliary
+read-only ENOENT signature after deterministic proof that a later successful
+read recovered the same filename; it then surfaces a warning.
+
+**Lesson.** Agent process cwd, native-tool cwd, and conversation status are
+separate state. Bind paths in the operations themselves, and distinguish a
+completed current turn from a stale/recovered envelope only with positive
+transcript evidence—never from response plausibility alone.
+
 ---
 
 ## §7. Smoke test protocol
@@ -1123,6 +1245,10 @@ cat > /tmp/agy-prompt-${REVIEW_ID}.md <<EOF
 <role>
 You are a senior adversarial reviewer of implementation plans.
 </role>
+<repository_context>
+Absolute repository root: ${REPO_ROOT}
+Treat every relative repository path as relative to this directory.
+</repository_context>
 <task>
 Confirm you received this prompt.
 </task>
@@ -1132,6 +1258,7 @@ End the LAST line with exactly: VERDICT: APPROVED
 EOF
 
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+  --add-dir "${REPO_ROOT}" \
   --model gemini-3.7-flash --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
@@ -1157,7 +1284,7 @@ find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' \
 # expect: exactly one path under brain/<conversation_id>/...
 ```
 
-### §7.2. Resume with cd prefix
+### §7.2. Resume with layered root binding
 
 Continuing from §7.1 — extract the conversation id and resume.
 
@@ -1180,11 +1307,16 @@ echo "CONVERSATION_ID=${CONVERSATION_ID}"             # expect a UUID
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
 cat > /tmp/agy-resume-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
+<repository_context>
+Absolute repository root: ${REPO_ROOT}
+Treat every relative repository path as relative to this directory.
+</repository_context>
 Still there? Reply with VERDICT: APPROVED.
 EOF
 
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation "${CONVERSATION_ID}" \
+  --add-dir "${REPO_ROOT}" \
   --model gemini-3.7-flash --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
@@ -1208,6 +1340,7 @@ grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 ```bash
 timeout 60 agy --print "Reply with VERDICT: APPROVED" \
   --conversation 00000000-0000-0000-0000-000000000000 \
+  --add-dir "${REPO_ROOT}" \
   --model gemini-3.7-flash --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 30s \
@@ -1237,6 +1370,9 @@ rm -rf "${TMPBARE}"
 rg -n 'agy --print "\$\(cat /tmp/agy-(resume-|recovery-)?prompt-' references/runner.md
 # expect: exactly the initial/fresh, resume, and recovery command lines
 
+test "$(rg -c -- '--add-dir "\$\{REPO_ROOT\}"' references/runner.md)" -eq 3
+# expect: every launch shape registers the absolute repository workspace
+
 if rg -n 'cat .*\|.*agy --print -|--continue --conversation' references/runner.md; then
   echo "obsolete agy transport found" >&2
   exit 1
@@ -1249,10 +1385,19 @@ test "$(rg -c '^</review_method>$' SKILL.md)" -eq 3
 test "$(rg -c '^Perform a static review only\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do NOT execute any command whose purpose is to verify, build, or run the project\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do not add a Verification section or report commands/checks as if you performed$' SKILL.md)" -eq 3
+test "$(rg -c '^<repository_context>$' SKILL.md)" -eq 3
+test "$(rg -c '^</repository_context>$' SKILL.md)" -eq 3
+test "$(rg -c '^Absolute repository root: <repo-root>$' SKILL.md)" -eq 3
+test "$(rg -c '^<!-- ADVERSARIAL-REVIEW-CONTRACT: <review-id> -->$' SKILL.md)" -eq 3
 
-# Runner must fail closed rather than launch agy without the policy.
-rg -n 'prompt body is missing or duplicates the required static-review policy' references/runner.md
-# expect: exactly one line
+# Reviewer diff commands must not depend on agy's native-tool cwd.
+rg -n 'Every diff command passed to the reviewer MUST be pinned' SKILL.md
+rg -n 'git -C "\$\{REPO_ROOT\}"' SKILL.md
+
+# Runner must delegate the security-critical prompt predicate to the executable
+# contract before launch.
+rg -n 'Fail-closed prompt contract check' references/runner.md
+rg -n 'python3 "\$\{RUNNER_CONTRACT_PATH\}" prompt' references/runner.md
 
 # Interrupted-stream recovery must remain marker-bound and within the existing
 # retry budget. Expect every command below to exit 0.
@@ -1260,6 +1405,18 @@ rg -n 'recoverable interrupted stream' references/runner.md
 rg -n 'The stream was interrupted\. Please continue the task you were working on\.' references/runner.md
 rg -n 'agy-recovery-prompt-\$\{REVIEW_ID\}' references/runner.md
 rg -n 'This is still the one and only retry' references/runner.md
+
+# Completed ERROR responses remain fail-closed except the repository-local,
+# read-only ENOENT signature guarded by deterministic fixtures.
+rg -n 'RECOVERABLE_READ_ERROR_CANDIDATE=true' references/runner.md
+rg -n 'scripts/runner_contract.py' SKILL.md references/runner.md
+rg -n 'the ONLY cases where a non-`SUCCESS` JSON status may' references/runner.md
+
+# Executable contract tests cover exit code, canonical containment, required
+# evidence, successful same-filename recovery, transcript errors/mismatch, and
+# quoted contract tags in fresh-exec history.
+python3 scripts/test_runner_contract.py
+# expect: 19 tests, OK
 ```
 
 ### §7.6. Cleanup smoke artifacts
@@ -1298,6 +1455,8 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-04-17 | Codex CLI 0.121.0 (pre-agy backend) | reference + container sandboxes | initial author + reviewers | Historical contract and the two-tier, attempt-scoped transcript binding were developed here; details retained in §6.6–§6.8. |
 | 2026-08-13 | agy 1.1.12 | Codex workspace | Codex | Reproduced the migrated stdin bug from review `1786638300-60419327`. Verified `--print "$(cat file)"`, JSON extraction, transcript marker binding, stable explicit resume, and exit-0/new-UUID behavior for a missing conversation. Real-diff dogfood also showed headless command auto-denial without `--dangerously-skip-permissions`, two `--sandbox` connection-reset failures, and `SUCCESS` without that unstable flag (§9.7). Updated §2, §6.9, and §7. |
 | 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Reproduced review `1787048123-58310427` as exit 1 + empty stderr + ERROR JSON + marker-bound interrupted transcript. Verified explicit UUID resume completes the review, later clean turns retain sticky ERROR state, a short ordinary plan-mode prompt succeeds, and `--disable-slash-commands` disables `--mode plan`. Added bounded conversation-preserving recovery (§4.15), JSON-aware diagnostics, and smoke guards. |
+| 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Diagnosed review `1787067240-58420371`: native `run_command` started in agy's scratch despite process `cd`; a recovered root-manifest ENOENT left `status=ERROR` beside a transcript-complete APPROVED response. Added layered root binding (§4.3), allowlisted marker-bound completion (§4.16), and dogfood/static regression guards. |
+| 2026-08-18 | agy 1.1.14 | deterministic fixtures + Codex workspace | Codex + independent adversarial review | Tightened §4.16 after adversarial review: exit 0 only, canonical containment, immutable original-task evidence, structurally bound same-filename read recovery, exact transcript completion, and contract/history-safe prompt validation now run in `scripts/runner_contract.py`; targeted negative fixtures cover those added boundaries. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1505,7 +1664,7 @@ The runner uses a two-channel protocol: the authoritative structured result is w
 
 ### §12.3 Retry budget — single owner
 
-Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation; every other failure repeats the original launch shape. Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
+Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation. §4.16 may accept a completed response without spending the retry, but only after its marker-bound transcript guard and with a warning; if that guard fails, the ordinary retry path applies. Every other failure repeats the original launch shape. Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
 
 **The full invariant:** *exactly 2 agy invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
 

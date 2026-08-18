@@ -112,7 +112,14 @@ Merge unstaged + staged (unique paths). If both are empty:
 3. `git diff --name-only ${BASE_BRANCH}...HEAD` — branch commits (fallback)
 
 Branch diff is used ONLY when there are no local changes — otherwise context bloats.
-For branch diff, include the command `git diff ${BASE_BRANCH}...HEAD` (full diff) in the prompt.
+For branch diff, include the command
+`git -C "${REPO_ROOT}" diff ${BASE_BRANCH}...HEAD` (full diff) in the prompt.
+
+Every diff command passed to the reviewer MUST be pinned to the captured root
+with `git -C "${REPO_ROOT}"`, including unstaged, staged, branch, path-limited,
+and `--no-index` commands. Substitute the literal validated root before writing
+the prompt. Do not rely on agy's internal command tool to inherit the CLI
+process cwd; agy 1.1.14 can default that tool to its own scratch directory.
 
 The reviewer has access to the repo and will read full diffs and files on its own.
 In the prompt (step 4), pass the file list and which git diff commands to run.
@@ -136,6 +143,15 @@ You are a senior adversarial reviewer of implementation plans.
 Your job is to break confidence in the plan, not to validate it.
 Operate read-only: inspect the plan and repository, but never modify any file.
 </role>
+
+<repository_context>
+Absolute repository root: <repo-root>
+Treat every relative repository path as relative to this directory.
+Use absolute paths under this root for repository file reads and searches;
+explicitly supplied task artifacts outside the root may be read at their given paths.
+Never guess that a conventional manifest or configuration file exists at the
+repository root. If its path was not supplied, locate it before reading it.
+</repository_context>
 
 <review_method>
 Perform a static review only.
@@ -161,6 +177,8 @@ uncertainty; do not resolve it by running a check.
 Do not add a Verification section or report commands/checks as if you performed
 them. Output only the sections required by <output_format>.
 </review_method>
+
+<!-- ADVERSARIAL-REVIEW-CONTRACT: <review-id> -->
 
 <operating_stance>
 Default to skepticism. Assume the plan has gaps until the evidence says otherwise.
@@ -231,6 +249,15 @@ Your job is to break confidence in the change, not to validate it.
 Operate read-only: inspect the diff and repository, but never modify any file.
 </role>
 
+<repository_context>
+Absolute repository root: <repo-root>
+Treat every relative repository path as relative to this directory.
+Use absolute paths under this root for repository file reads and searches;
+explicitly supplied task artifacts outside the root may be read at their given paths.
+Never guess that a conventional manifest or configuration file exists at the
+repository root. If its path was not supplied, locate it before reading it.
+</repository_context>
+
 <review_method>
 Perform a static review only.
 Your evidence-gathering is limited to:
@@ -254,7 +281,14 @@ uncertainty; do not resolve it by running a check.
 
 Do not add a Verification section or report commands/checks as if you performed
 them. Output only the sections required by <output_format>.
+
+Begin with the supplied diffs and changed files. Inspect additional files only
+to test a concrete correctness hypothesis. Do not inspect package manifests or
+test-runner configuration merely to confirm that verification commands can run;
+the main agent owns execution validation.
 </review_method>
+
+<!-- ADVERSARIAL-REVIEW-CONTRACT: <review-id> -->
 
 <operating_stance>
 Default to skepticism. Assume the change can fail in subtle, high-cost,
@@ -354,13 +388,19 @@ The inlined prompt bodies above contain template placeholders that main must res
 
 | Placeholder | Value source | Applies to |
 |---|---|---|
+| `<repo-root>` | literal absolute `REPO_ROOT` captured at Step 2 | all modes |
+| `<review-id>` | literal `REVIEW_ID` generated at Step 2 | all modes |
 | `${BASE_BRANCH}` | captured at Step 2 (code & code-vs-plan only) | code, code-vs-plan |
 | `<plan-path>` | captured at Step 3 | plan, code-vs-plan |
 | `<file list from --name-only>` | result of `git diff --name-only` + `git diff --cached --name-only` (or branch diff) from Step 3 | code, code-vs-plan (≤50 files only) |
 | `<unstaged changes / staged changes / ...>` | human-readable description derived from which diff commands had content | code, code-vs-plan |
-| `<git diff commands>` | the exact commands main determined at Step 3 (e.g. `git diff`, `git diff --cached`, `git diff ${BASE_BRANCH}...HEAD`) | code, code-vs-plan |
+| `<git diff commands>` | the exact root-pinned commands main determined at Step 3 (e.g. `git -C "<repo-root>" diff`, `git -C "<repo-root>" diff --cached`, `git -C "<repo-root>" diff ${BASE_BRANCH}...HEAD`) | code, code-vs-plan |
 
-Substitute `${BASE_BRANCH}` first (it appears nested inside `<unstaged changes / staged changes / ...>`), then compute the outer human-readable description based on which diffs have content. Main writes the substituted string to the Write tool — no template placeholders should remain in the body file sent to the runner.
+Substitute `<repo-root>`, `<review-id>`, and `${BASE_BRANCH}` first (the latter
+appears nested inside `<unstaged changes / staged changes / ...>`), then compute
+the outer human-readable description based on which diffs have content. Main
+writes the substituted string to the Write tool — no template placeholders
+should remain in the body file sent to the runner.
 
 **Capture user overrides for `AGY_MODEL` at Step 1:**
 
@@ -372,7 +412,12 @@ These are passed into the runner YAML input block below.
 
 **Write the prompt body to disk via Write tool:**
 
-Write `/tmp/agy-body-${REVIEW_ID}.md` containing the substituted body text (no session marker — the runner adds it).
+Write the substituted body text (no session marker — the runner adds it) to
+both `/tmp/agy-body-${REVIEW_ID}.md` and
+`/tmp/agy-original-body-${REVIEW_ID}.md`. The second file is immutable for the
+review lifecycle: never overwrite it during resume or fresh-exec fallback. The
+runner uses it to distinguish an auxiliary guessed path from evidence the
+original task explicitly required.
 
 Do NOT abbreviate, remove, or duplicate the `<review_method>` block. The runner
 checks for exactly one block and its static-review anchors before every agy
@@ -409,7 +454,15 @@ REPO=$(git rev-parse --show-toplevel 2>/dev/null) && ls "$REPO/references/runner
 
 4. **Abort**: if no path yields a readable file, tell the user: `Could not locate references/runner.md. Expected locations: (1) ~/.codex/skills/adversarial-review/references/runner.md, (2) ~/.codex/plugins/cache/*/*/*/skills/adversarial-review/references/runner.md, (3) $(git rev-parse --show-toplevel)/references/runner.md. Re-install the skill.` Abort the skill.
 
-Save the resolved absolute path as `RUNNER_SPEC_PATH`. Do NOT attempt to extract the path from any "Base directory for this skill:" line in the conversation — that line is a system injection that cannot be reliably read from inside context.
+Save the resolved absolute path as `RUNNER_SPEC_PATH`. Derive
+`RUNNER_CONTRACT_PATH` from the same install root: remove the literal suffix
+`/references/runner.md` from `RUNNER_SPEC_PATH`, then append
+`/scripts/runner_contract.py`. Require the result to be a readable regular
+file. If it is absent, abort with
+`Could not locate scripts/runner_contract.py beside the resolved runner spec. Re-install the skill.`
+Do NOT attempt to extract either path from any "Base directory for this skill:"
+line in the conversation — that line is a system injection that cannot be
+reliably read from inside context.
 
 **Dispatch the runner subagent via Agent tool:**
 
@@ -428,12 +481,17 @@ REVIEW_ID: 1711872000-48217593
 REPO_ROOT: /home/dementev/sources/myproject
 OPERATION: initial
 AGY_MODEL: gemini-3.7-flash
+RUNNER_CONTRACT_PATH: /home/dementev/.codex/skills/adversarial-review/scripts/runner_contract.py
 PROMPT_BODY_PATH: /tmp/agy-body-1711872000-48217593.md
+ORIGINAL_PROMPT_BODY_PATH: /tmp/agy-original-body-1711872000-48217593.md
 RESULT_PATH: /tmp/agy-runner-result-1711872000-48217593.json
 ---
 ```
 
-Substitute the actual resolved `${RUNNER_SPEC_PATH}` (absolute path) and real values for every other placeholder. `RESULT_PATH` always follows the pattern `/tmp/agy-runner-result-${REVIEW_ID}.json`.
+Substitute the actual resolved `${RUNNER_SPEC_PATH}` and
+`${RUNNER_CONTRACT_PATH}` (both absolute paths) and real values for every other
+placeholder. `RESULT_PATH` always follows the pattern
+`/tmp/agy-runner-result-${REVIEW_ID}.json`.
 
 **Do NOT run the Agent tool call in background.** Wait for the subagent to return.
 
@@ -562,6 +620,17 @@ Do not add a Verification section or report commands/checks as if you performed
 them. Output only the sections required by <output_format>.
 </review_method>
 
+<repository_context>
+Absolute repository root: <repo-root>
+Treat every relative repository path as relative to this directory.
+Use absolute paths under this root for repository file reads and searches;
+explicitly supplied task artifacts outside the root may be read at their given paths.
+Never guess that a conventional manifest or configuration file exists at the
+repository root. If its path was not supplied, locate it before reading it.
+</repository_context>
+
+<!-- ADVERSARIAL-REVIEW-CONTRACT: <review-id> -->
+
 I've revised based on your feedback.
 
 Here's what I changed:
@@ -574,7 +643,9 @@ Re-review with the same adversarial stance. Focus on:
 End with VERDICT: APPROVED or VERDICT: REVISE
 ```
 
-Substitute the fixes list from Step 6 (one bullet per finding addressed). Do NOT include the session marker — the subagent adds it.
+Substitute `<repo-root>` with the literal `REPO_ROOT`, `<review-id>` with the
+literal `REVIEW_ID`, and the fixes list from Step 6 (one bullet per finding
+addressed). Do NOT include the session marker — the subagent adds it.
 
 **Step 7.2: Dispatch the runner subagent for resume.**
 
@@ -586,7 +657,9 @@ REVIEW_ID: <same as initial round>
 REPO_ROOT: <same>
 OPERATION: resume
 AGY_MODEL: <same>
+RUNNER_CONTRACT_PATH: <same absolute helper path>
 PROMPT_BODY_PATH: /tmp/agy-resume-body-<REVIEW_ID>.md
+ORIGINAL_PROMPT_BODY_PATH: /tmp/agy-original-body-<REVIEW_ID>.md
 RESULT_PATH: /tmp/agy-runner-result-<REVIEW_ID>.json
 AGY_CONVERSATION_ID: <uuid from previous round's runner result>
 ---
@@ -603,6 +676,7 @@ Extract `RUNNER_RESULT_AT:` line (same tolerant regex + Glob fallback as Step 4)
 | `timeout` | **TERMINAL for this round** — runner already attempted twice. Route to fallback below. (Fresh-exec is a NEW round from the 5-round counter — its own ≤2-attempts budget applies.) No user-offered retry; that would compound. |
 | `launch_failure` | **TERMINAL for this round** — runner already retried once internally. Route to fallback below (runner already archived stdout/stderr to `-failed-resume.*` — paths in `archived_stdout` / `archived_stderr`). |
 | `infra_error` | Show `errors` to user, abort. |
+| `input_error` | Bug in orchestration. Show `errors` to user, abort; do not route to fallback. |
 
 **Round-level attempt invariant:** exactly ONE runner dispatch per resume round. Every failure result routes to fallback (not re-dispatch within the same round). Fallback's fresh-exec dispatch consumes a NEW round from the 5-round counter, which has its own independent 2-attempts-per-round budget. Total Antigravity invocations per round ≤ 2 regardless of failure type.
 
@@ -625,7 +699,15 @@ Options:
 - Max severity `critical` or `high` → fresh exec automatically.
 - Max severity `medium` only → Step 8 with the not-verified terminal state.
 
-*Fresh-exec dispatch:* build a new PROMPT_BODY that is the original Step 4 prompt for the current mode, followed by sections `## Previous review rounds` (verbatim round-1..N reviews + fixes from conversation history) and `## Current state of the artifact`. Write to `/tmp/agy-body-${REVIEW_ID}.md` (overwriting the original).
+*Fresh-exec dispatch:* build a new PROMPT_BODY that is the original Step 4
+prompt for the current mode, followed by sections `## Previous review rounds`
+(verbatim round-1..N reviews + fixes from conversation history) and
+`## Current state of the artifact`. Write to
+`/tmp/agy-body-${REVIEW_ID}.md` (overwriting the working body). The original
+template already contains the review-scoped contract boundary before any task
+or history content; the helper validates only the prefix before its first
+occurrence, so quoted tags or later quoted copies cannot affect the contract.
+Do not overwrite `/tmp/agy-original-body-${REVIEW_ID}.md`.
 
 **Archival note:** if the fallback was triggered by `launch_failure`, the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 — main does NOT need to `mv` anything. If triggered by repeated `timeout`, no archival happened (no second Antigravity invocation produced useful diagnostics); main can proceed directly. Either way, main never touches `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` itself.
 
@@ -700,6 +782,8 @@ rm -f /tmp/agy-plan-${REVIEW_ID}.md \
       /tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl \
       /tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt \
       /tmp/agy-body-${REVIEW_ID}.md \
+      /tmp/agy-original-body-${REVIEW_ID}.md \
+      /tmp/agy-resume-body-${REVIEW_ID}.md \
       /tmp/agy-runner-result-${REVIEW_ID}.json
 ```
 
@@ -713,20 +797,20 @@ Do NOT delete plan files that existed before the review (only temp files created
 - Reviewer findings are shown **verbatim** — do not rephrase or shorten. The Step 5 "YOUR NEXT MESSAGE" instruction is blocking.
 - Auto-detect review mode from context; user arguments take priority.
 - With explicit `plan` argument or in Codex Plan Mode: skip git checks and base branch detection.
-- **`REPO_ROOT` is captured at Step 2** and passed as an absolute literal to every runner dispatch.
-- **`RUNNER_SPEC_PATH` is resolved at Step 4** (once per review) with priority: (1) `~/.codex/skills/adversarial-review/references/runner.md` (user-scoped install), (2) Glob `~/.codex/plugins/cache/**/skills/adversarial-review/references/runner.md` and take first hit (plugin-marketplace install), (3) `$(git rev-parse --show-toplevel)/references/runner.md` (dev checkout), (4) abort with installation error. Main never attempts to read system prompt / skill-invocation headers.
-- **Antigravity reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, fail-closed validation of the required static-review policy, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, JSON-aware failure diagnostics, marker-bound interrupted-stream recovery, two-tier session-id capture with positive content-bind, ONE internal retry on ANY failure type (launch_failure, timeout, stderr-infra), archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
+- **`REPO_ROOT` is captured at Step 2** and passed as an absolute literal to every runner dispatch, every prompt's `<repository_context>`, agy's `--add-dir`, and every reviewer `git -C` diff command.
+- **`RUNNER_SPEC_PATH` and `RUNNER_CONTRACT_PATH` are resolved together at Step 4** (once per review). The spec lookup priority is: (1) `~/.codex/skills/adversarial-review/references/runner.md` (user-scoped install), (2) Glob `~/.codex/plugins/cache/**/skills/adversarial-review/references/runner.md` and take first hit (plugin-marketplace install), (3) `$(git rev-parse --show-toplevel)/references/runner.md` (dev checkout), (4) abort with installation error. The helper must be the sibling install file `scripts/runner_contract.py`. Main never attempts to read system prompt / skill-invocation headers.
+- **Antigravity reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, fail-closed validation of the required static-review and repository-root context via `scripts/runner_contract.py`, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, JSON-aware failure diagnostics, marker-bound interrupted-stream recovery, deterministic proof of a completed review after a narrowly allowlisted read-only missing-file error, two-tier session-id capture with positive content-bind, ONE internal retry on ANY failure type (launch_failure, timeout, stderr-infra), archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
 - **Two-channel result protocol.** Runner writes structured JSON to `/tmp/agy-runner-result-${REVIEW_ID}.json` (authoritative) AND returns a single `RUNNER_RESULT_AT: <path>` line as its final message. Main extracts the path via regex, reads the JSON, and never relies on raw-JSON-in-message parsing.
 - **Main thread reads only**: the runner result JSON at `RESULT_PATH` and the review file at `review_file`. Main does NOT Read `references/runner.md` — the runner spec is passed by path to the subagent, which Reads it itself. No other `/tmp/agy-*` reads.
 - **Runner is dispatched via Agent tool** with `subagent_type: general-purpose`. Agent tool call is synchronous (not `run_in_background`).
-- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it; every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
-- **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves both the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and the narrow agy-1.1.14 sticky-ERROR recovery diagnostic.
+- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
+- **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and both narrow agy-1.1.14 non-`SUCCESS` recovery diagnostics.
 - **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-3.7-flash`).
 - **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
-- **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.
+- **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, `/tmp/agy-original-body-${REVIEW_ID}.md`, `/tmp/agy-resume-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.
 - Cleanup is **conditional on terminal state**: remove temp files on approved/max-reached/not-verified; LEAVE them on abort (diagnostic value). Skip all cleanup in Plan Mode.
-- Always launch agy with `--mode plan`; reviewer prompts explicitly prohibit file changes and project execution. Runner also passes `--dangerously-skip-permissions` because headless agy cannot prompt for the exact `git diff` commands needed to inspect the repository. Plan mode does not replace the prompt's static-review boundary. Do NOT add agy's `--sandbox` flag on 1.1.12: repeated dogfood runs ended with `status=ERROR` and `connecting to sandbox server ... connection reset by peer` after repository commands.
+- Always launch agy with `--mode plan` and `--add-dir "${REPO_ROOT}"`; reviewer prompts explicitly prohibit file changes and project execution. Runner also passes `--dangerously-skip-permissions` because headless agy cannot prompt for the exact `git diff` commands needed to inspect the repository. Plan mode does not replace the prompt's static-review boundary. Do NOT add agy's `--sandbox` flag on 1.1.12: repeated dogfood runs ended with `status=ERROR` and `connecting to sandbox server ... connection reset by peer` after repository commands.
 - Maximum 5 rounds to protect against infinite loops.
 - Show the user reviews and fixes for each round.
 - If Antigravity CLI (agy) is not installed — tell the user to install Antigravity CLI (agy) (`agy`).

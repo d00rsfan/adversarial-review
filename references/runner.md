@@ -13,7 +13,9 @@ REVIEW_ID: <string, format "{unix_ts}-{8-digit}">
 REPO_ROOT: <absolute path, validated by main>
 OPERATION: initial | resume | fresh-exec
 AGY_MODEL: <e.g. gemini-3.7-flash>  # the model agy CLI launches
+RUNNER_CONTRACT_PATH: <absolute path to scripts/runner_contract.py>
 PROMPT_BODY_PATH: <absolute path to file containing the review prompt body WITHOUT the session marker; main writes this before dispatch>
+ORIGINAL_PROMPT_BODY_PATH: <absolute path to immutable initial review prompt body>
 AGY_CONVERSATION_ID: <UUID, required only when OPERATION=resume>
 RESULT_PATH: /tmp/agy-runner-result-<REVIEW_ID>.json  # you write the structured result here
 ```
@@ -57,7 +59,7 @@ Rules:
 - `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
 - `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
-- `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume).
+- `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume or a marker-bound non-`SUCCESS` recovery).
 - Do NOT return the review text in the JSON. Main reads `review_file` directly.
 
 ## Step-by-step
@@ -74,22 +76,34 @@ Save the output as `${ATTEMPT_ID}` for this invocation. Generate a NEW ATTEMPT_I
 
 ### Step R2: Build the launch prompt file
 
-Read `${PROMPT_BODY_PATH}` (main wrote it before dispatching you).
+Read `${PROMPT_BODY_PATH}` (main wrote it before dispatching you). Also require
+`${ORIGINAL_PROMPT_BODY_PATH}` to be a readable regular file. If either body is
+missing or unreadable, write `input_error` and return without launching agy;
+the immutable original is required even when the ordinary SUCCESS path would
+not otherwise inspect it.
 
-**Fail-closed static-review policy check.** Before writing a launch prompt or
-calling agy, require the body to contain exactly one `<review_method>` opening
-tag, exactly one `</review_method>` closing tag, and all three literal anchors
-below:
+**Fail-closed prompt contract check.** Before writing a launch prompt or
+calling agy, require `${RUNNER_CONTRACT_PATH}` to be a readable regular file,
+then invoke:
 
-- `Perform a static review only.`
-- `Do NOT execute any command whose purpose is to verify, build, or run the project.`
-- `Do not add a Verification section or report commands/checks as if you performed`
+```bash
+python3 "${RUNNER_CONTRACT_PATH}" prompt \
+  --prompt-body "${PROMPT_BODY_PATH}" \
+  --repo-root "${REPO_ROOT}" \
+  --operation "${OPERATION}" \
+  --review-id "${REVIEW_ID}"
+```
 
-If either tag or any anchor is missing, or if either tag occurs more than once,
-write an `input_error` result with
-`errors: "prompt body is missing or duplicates the required static-review policy"`
-and return the `RUNNER_RESULT_AT:` line. Do NOT reconstruct the policy, launch
-agy, or retry. This check applies to initial, fresh-exec, and resume operations.
+Parse its one-line JSON output. Continue only when the command exits 0 and
+returns `valid: true`. Otherwise write an `input_error` result whose `errors`
+contains the helper's `reason`, return the `RUNNER_RESULT_AT:` line, and do NOT
+launch or retry agy. The helper checks exactly one static-review policy and
+repository-context block before the first review-scoped
+`<!-- ADVERSARIAL-REVIEW-CONTRACT: ${REVIEW_ID} -->` boundary, including all
+policy anchors and one exact absolute-root line. Task artifacts, resume fix
+summaries, and verbatim history occur after that unpredictable boundary, so
+quoted tags or quoted later copies of the boundary cannot corrupt the contract
+check.
 
 For `OPERATION=initial` or `OPERATION=fresh-exec`:
 - Write `/tmp/agy-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` followed by the body.
@@ -113,6 +127,7 @@ For `OPERATION=initial` and `OPERATION=fresh-exec`:
 
 ```bash
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+  --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
@@ -132,6 +147,7 @@ bound `${RECOVERY_CONVERSATION_ID}` to `--conversation`:
 ```bash
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
   --conversation ${RECOVERY_CONVERSATION_ID} \
+  --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
@@ -153,6 +169,7 @@ For `OPERATION=resume`:
 ```bash
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation ${AGY_CONVERSATION_ID} \
+  --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
@@ -203,6 +220,26 @@ existing retry budget by continuing the marker-bound conversation instead of
 throwing its gathered context away. Save its UUID as
 `${RECOVERY_CONVERSATION_ID}` and its JSON error as `${RECOVERY_ORIGINAL_ERROR}`.
 
+Separately classify the attempt as a **candidate completed review after a
+recoverable read-only missing-file error** only when ALL of these preliminary
+conditions hold:
+
+- agy exited 0;
+- `status` is `ERROR`;
+- `response` is non-empty;
+- `error` starts with
+  `declaring permissions: cortex tool view_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) failed to read file: open ${REPO_ROOT}/`
+  and ends with `: no such file or directory`;
+- `conversation_id` is a valid UUID;
+- for `OPERATION=resume`, that UUID equals `${AGY_CONVERSATION_ID}` and stderr
+  does not contain the missing-conversation warning;
+- that UUID's transcript exists.
+
+Set `RECOVERABLE_READ_ERROR_CANDIDATE=true`. This classification does NOT by
+itself accept the review. It only permits R4.3's deterministic contract helper
+to validate the current turn. Do not broaden the error pattern to other tools,
+permission failures, command failures, or arbitrary `invalid_args` errors.
+
 **Check R4.1: Exit code.**
 - `124` → route to retry (Step R5). Same retry budget as any other failure — ONE retry per dispatch total. If retry also returns 124, write `{"result":"timeout",...}` and return. (Retrying on timeout keeps the 2-attempts-per-round invariant consistent across failure types; main treats timeout as terminal just like launch_failure.)
 - `≠ 0 and ≠ 124` on the first attempt + R4.0 classified a recoverable interrupted stream → route to the interrupted-stream branch of Step R5.
@@ -223,6 +260,8 @@ throwing its gathered context away. Save its UUID as
   `conversation_id` equals `${RECOVERY_CONVERSATION_ID}`, `error` equals
   `${RECOVERY_ORIGINAL_ERROR}`, and `response` is non-empty. Set
   `RECOVERY_STALE_STATUS_CANDIDATE=true`; this is NOT success yet.
+- When `RECOVERABLE_READ_ERROR_CANDIDATE=true`, continue provisionally; this
+  is NOT success until the deterministic helper below returns `valid: true`.
 - Every other `status != "SUCCESS"` → route to retry. Include the parsed
   `status` and `error` in the diagnostic.
 
@@ -245,14 +284,45 @@ current recovery marker. Inspect only records after that input. Require:
 If either condition fails, the recovery failed closed. If both pass, set
 `user_warning` to exactly:
 `agy recovered an interrupted response stream; agy retained the prior ERROR status, but the marker-bound recovery turn completed without a new transcript error and returned a valid review`
-and proceed. This narrow branch is the ONLY place where a non-`SUCCESS` JSON
-status may produce `result=success`.
+and proceed.
+
+If `RECOVERABLE_READ_ERROR_CANDIDATE=true`, invoke the deterministic contract
+helper below. Substitute literal values; omit `--expected-conversation-id` for
+initial/fresh-exec and include it with `${AGY_CONVERSATION_ID}` for resume.
+
+```bash
+python3 "${RUNNER_CONTRACT_PATH}" recovered-read \
+  --stdout-json "/tmp/agy-stdout-${REVIEW_ID}.jsonl" \
+  --transcript "$HOME/.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript_full.jsonl" \
+  --prompt-body "${PROMPT_BODY_PATH}" \
+  --original-prompt-body "${ORIGINAL_PROMPT_BODY_PATH}" \
+  --repo-root "${REPO_ROOT}" \
+  --marker "ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}" \
+  --operation "${OPERATION}" \
+  --agy-exit-code 0 \
+  --stderr "/tmp/agy-stderr-${REVIEW_ID}.txt" \
+  [--expected-conversation-id "${AGY_CONVERSATION_ID}"]
+```
+
+Parse its one-line JSON output. If the command is non-zero or `valid` is not
+true, route to retry with the helper's `reason`. If valid, copy its exact
+non-empty `warning` into `user_warning` and proceed. The helper proves all of:
+exit 0; canonical containment without `.`/`..` traversal; the failed path was
+not supplied by either the immutable original task or the current prompt;
+marker binding; no later
+`ERROR_MESSAGE`; a later successful repository-local `view_file` result for a
+different path with the same basename, encoded as the empirical single-call
+`PLANNER_RESPONSE/DONE` immediately followed by non-empty `GENERIC/DONE`;
+valid verdict semantics; and exact
+final `PLANNER_RESPONSE/DONE` equality. The interrupted-stream recovery and
+this helper-validated read-only missing-file branch are the ONLY cases where a
+non-`SUCCESS` JSON status may produce `result=success`.
 
 - Verdict is `APPROVED` → write this EXACT JSON object to `${RESULT_PATH}` and return the `RUNNER_RESULT_AT:` line:
 
-  For a normal `SUCCESS`, use `null` below. If the sticky-status recovery
-  guard passed, substitute the exact recovery-warning string from above for
-  that one `user_warning` value; never write a descriptive placeholder.
+  For a normal `SUCCESS`, use `null` below. If either non-`SUCCESS` guard
+  passed, substitute its exact warning string for that one
+  `user_warning` value; never write a descriptive placeholder.
 
   ```json
   {
@@ -288,9 +358,9 @@ find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' -newer <ancho
 
 - **Exactly one path** → extract the trailing UUID from the filename (the UUID is the directory name directly under `brain`, e.g. `.../brain/<UUID>/.system_generated/...`). For `OPERATION=resume`, require that UUID to equal the input `${AGY_CONVERSATION_ID}`; a mismatch routes to retry with the same `resume conversation id changed` diagnostic as the primary tier. Otherwise write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
 
-For the JSON shape below, use `user_warning: null` on normal success. If the
-sticky-status recovery guard passed, substitute the exact recovery-warning
-string from R4.3; never write a descriptive placeholder.
+For the JSON shape below, use `user_warning: null` on normal success. If either
+non-`SUCCESS` guard passed, substitute its exact warning string from R4.3;
+never write a descriptive placeholder.
 
 ```json
 {
@@ -348,6 +418,13 @@ Do not run tests, builds, compilation, linting, formatting, dependency operation
 Do not add a Verification section or report commands/checks as if you performed them.
 </review_method>
 
+<repository_context>
+Absolute repository root: ${REPO_ROOT}
+Treat every relative repository path as relative to this directory.
+Use absolute paths under this root for repository file reads and searches; explicitly supplied task artifacts outside the root may be read at their given paths.
+Never guess that a conventional manifest or configuration file exists at the repository root. If its path was not supplied, locate it before reading it.
+</repository_context>
+
 The previous response stream was interrupted. Continue the SAME review from the evidence and task already in this conversation. Do not restart broad repository discovery. Return only the required Summary, Findings, and Verdict sections, ending with VERDICT: APPROVED or VERDICT: REVISE.
 ```
 
@@ -355,7 +432,8 @@ Launch it synchronously with the Step R3 recovery command using
 `${RECOVERY_CONVERSATION_ID}`. Set `INTERRUPTED_STREAM_RECOVERY=true`, extract
 the review, and run R4.0–R4.4 with the recovery-specific guards above.
 
-**B. Every other retryable failure.** Rewrite the operation's original prompt
+**B. Every other retryable failure, including a read-only missing-file
+candidate that failed its completed-turn guard.** Rewrite the operation's original prompt
 file with the new marker and re-launch with the same Step R3 command as before.
 
 Whichever branch is chosen, this is the second and final attempt. Any check's
