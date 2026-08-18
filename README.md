@@ -105,18 +105,20 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 "Bash(git status*)",
 "Bash(git symbolic-ref*)",
 "Bash(git rev-parse*)",
-// Antigravity: initial/fresh/resume launch (prompt is one --print argument)
+// Antigravity: initial/fresh/resume/recovery launch (prompt is one --print argument)
 "Bash(cd * && timeout 600 agy --print *)",
 // Prompt-file reads performed by the quoted command substitutions
 "Bash(cat /tmp/agy-prompt-*)",
 "Bash(cat /tmp/agy-resume-prompt-*)",
+"Bash(cat /tmp/agy-recovery-prompt-*)",
 // Conversation-id filesystem fallback (find -newer + grep -l content match)
 "Bash(find ~/.gemini/antigravity-cli/brain*)",
 "Bash(ls -t ~/.gemini/antigravity-cli/brain*)",
-// Temp files: prompts (initial + resume), plans, review output, JSON stdout, stderr
+// Temp files: prompts (initial + resume + recovery), plans, review output, JSON stdout, stderr
 "Write(/tmp/agy-plan-*)",
 "Write(/tmp/agy-prompt-*)",
 "Write(/tmp/agy-resume-prompt-*)",
+"Write(/tmp/agy-recovery-prompt-*)",
 "Read(/tmp/agy-review-*)",
 "Read(/tmp/agy-stdout-*)",
 "Read(/tmp/agy-stderr-*)",
@@ -152,11 +154,13 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
       "Bash(cd * && timeout 600 agy --print *)",
       "Bash(cat /tmp/agy-prompt-*)",
       "Bash(cat /tmp/agy-resume-prompt-*)",
+      "Bash(cat /tmp/agy-recovery-prompt-*)",
       "Bash(find ~/.gemini/antigravity-cli/brain*)",
       "Bash(ls -t ~/.gemini/antigravity-cli/brain*)",
       "Write(/tmp/agy-plan-*)",
       "Write(/tmp/agy-prompt-*)",
       "Write(/tmp/agy-resume-prompt-*)",
+      "Write(/tmp/agy-recovery-prompt-*)",
       "Read(/tmp/agy-review-*)",
       "Read(/tmp/agy-stdout-*)",
       "Read(/tmp/agy-stderr-*)",
@@ -238,6 +242,18 @@ All reviewer calls use `--print-timeout 10m` and are also wrapped in
 `timeout 600`. If you see exit code 124, the reviewer did not respond in time.
 Retry — this is usually
 transient.
+
+**Antigravity reports `The stream was interrupted`.**
+On agy 1.1.14 a failed headless turn can return `status: ERROR`, an empty
+response, a valid `conversation_id`, and no stderr detail. The runner verifies
+the per-attempt marker and exact interruption message in that conversation's
+transcript, then spends its one existing retry by continuing the same
+conversation. It never accepts the empty failed response and never adds a
+third invocation. agy may retain the old JSON `ERROR` status after a clean
+recovery turn; the runner accepts that result only when the error value is
+unchanged, the conversation ID matches, the recovery response has a valid
+verdict, and the marker-bound recovery turn has no new transcript error. A
+one-line warning is shown before the recovered review.
 
 **Resume fails with session error.**
 The skill uses `agy --conversation <conversation-id>` for rounds 2+. On failure

@@ -129,10 +129,11 @@ this document exists to manage.
 
 ---
 
-## §2. Antigravity CLI empirical facts (verified on v1.1.12)
+## §2. Antigravity CLI empirical facts (verified on v1.1.12 and v1.1.14)
 
-The current contract was verified on `agy 1.1.12` on 2026-08-13 (see
-`§8. Version and verification log`). The prior text in this section was
+The transport contract was verified on `agy 1.1.12` on 2026-08-13 and the
+interrupted-stream behavior was re-verified on `agy 1.1.14` on 2026-08-18
+(see `§8. Version and verification log`). The prior text in this section was
 mechanically inherited from Codex CLI 0.121.0 during the agy migration;
 those Codex-specific flags and stream semantics were never valid agy facts.
 Re-run `§7` after upgrading agy.
@@ -187,6 +188,17 @@ suffix is retained for compatibility with existing cleanup and archive paths,
 although the file contains a single JSON value. A separate Python extraction
 writes `.response` to `/tmp/agy-review-${REVIEW_ID}.md`.
 
+On agy 1.1.14, a model-stream interruption can instead produce exit 1 with a
+parseable JSON object: `status=ERROR`, empty `response`, generic
+`error="Agent execution terminated due to error."`, and a valid
+`conversation_id`; stderr can still be empty. The bound transcript contains
+the specific `The stream was interrupted` error. Resuming that exact UUID can
+finish the review, but the JSON `status` and `error` are sticky conversation
+state: a later clean no-tool turn returned a complete response and exit 0 while
+the envelope still reported the earlier `ERROR`. Therefore status alone is
+strict for ordinary launches but cannot prove that a marker-bound recovery turn
+failed; §4.15 defines the narrow transcript guard used for that one case.
+
 **Superseded migration assumptions:** ~~`--json` emits `thread.started`
 JSONL events~~ and ~~`-o FILE` stores the final response.~~ Those were Codex
 CLI behaviors. agy uses `--output-format json`, the field is
@@ -237,7 +249,8 @@ found` to stderr, exits **0**, and returns `SUCCESS` with a new
 requires every resume result id (primary or transcript fallback) to equal the
 requested id. A valid verdict does not override this equality check.
 
-**§2.4.4. Conversation ID remains stable across resume.** On 1.1.12 an
+**§2.4.4. Conversation ID remains stable across resume.** On 1.1.12 and in the
+1.1.14 interrupted-stream recovery probe, an
 initial headless call and a successful `--conversation <that-id>` call both
 return the same `conversation_id`. The runner still refreshes the value from
 every successful REVISE response so a future rotation cannot silently drift.
@@ -251,6 +264,8 @@ every successful REVISE response so a future rotation cannot silently drift.
 | External timeout | 124 | partial or empty | partial or empty | rejected |
 | Invalid model/auth | non-zero or non-SUCCESS JSON | empty/error JSON | diagnostic possible | rejected |
 | Missing `--conversation` UUID | 0 observed | SUCCESS JSON with a new UUID | warning | rejected by warning/id equality |
+| 1.1.14 interrupted model stream | 1 observed | ERROR JSON, empty response, valid UUID | empty observed | marker-bound conversation recovery uses the one retry |
+| Clean turn after an interrupted 1.1.14 conversation | 0 observed | complete response but sticky ERROR/error | empty observed | accepted only by §4.15's current-turn transcript guard |
 | Malformed JSON or empty response | may be 0 | malformed/empty | may be empty | empty review; rejected |
 
 The semantic verdict check remains mandatory even after exit 0 because the
@@ -259,14 +274,15 @@ application success.
 
 ### §2.6. CLI gaps relevant to the skill
 
-- No prompt-file or documented stdin-prompt mode in agy 1.1.12.
+- No prompt-file or documented stdin-prompt mode in agy 1.1.12 or 1.1.14.
 - No cwd flag; use an explicit `cd` prefix.
 - `--output-format json` is a single object; use `stream-json` only when an
   event stream is actually wanted (the skill does not).
 - `--print-timeout` defaults to 5 minutes, so the runner sets `10m` to align
   it with the outer `timeout 600` guard.
 - Reviewer intent is constrained with `--mode plan` and an explicit no-write,
-  static-review-only instruction in every initial, fresh, and resume prompt.
+  static-review-only instruction in every initial, fresh, resume, and
+  interrupted-stream recovery prompt.
   Plan mode does not by itself prohibit shell commands: the prompt separately
   limits evidence gathering to the supplied read-only `git diff` commands plus
   file read/search and forbids builds, compilation, tests, and other project
@@ -276,6 +292,10 @@ application success.
   therefore bounded by the reviewer prompt. agy 1.1.12's
   `--sandbox` is not used because repeated real-diff runs ended with
   `status=ERROR` and a sandbox-server connection reset (§9.7).
+- agy 1.1.14 adds `--disable-slash-commands`, but combining it with
+  `--mode plan` prints `--mode plan has no effect while slash command expansion
+  is disabled`. The runner does not use that apparent transport workaround
+  because it would silently remove the additional plan-mode guard.
 
 ---
 
@@ -498,22 +518,29 @@ Each decision below follows the same template:
   prompt wording; prompt drift would be a separate failure mode (see
   §6).
 
-### §4.8. Strict check order: exit → stderr → JSON → review → id capture
+### §4.8. Strict check order: diagnostic JSON → exit → stderr → JSON → review → id capture
 
 - **Decision.** After every fresh or `--conversation` agy call,
   checks run in a fixed order:
-  1. Exit code.
-  2. Stderr file (even on exit 0).
-  3. JSON parse, `status=SUCCESS`, and requested-id equality on resume.
-  4. Extracted review file semantic sanity.
-  5. Conversation-id capture (two-tier, `§4.1`). In Step 4 this is skipped
+  1. Opportunistically parse JSON fields for diagnostics and the exact §4.15
+     interrupted-stream classification; this never accepts a review.
+  2. Exit code.
+  3. Stderr file (even on exit 0).
+  4. Strict JSON parse, status, and requested-id equality on resume. Ordinary
+     launches still require `status=SUCCESS`; only §4.15's marker-bound
+     recovery can pass with a sticky prior `ERROR`.
+  5. Extracted review file semantic sanity.
+  6. Conversation-id capture (two-tier, `§4.1`). In Step 4 this is skipped
      on `VERDICT: APPROVED` — no resume will happen, so no session
      is needed. In Step 7 it is a defensive refresh (conversation id
      doesn't rotate per `§2.4.4`) and is skipped identically on
      APPROVED.
 - **Where in SKILL.md.** Steps 4 and 7 post-launch.
-- **Context.** Non-zero exit implies the JSON response may not exist;
-  extraction then yields an empty review. Exit 0 still does not imply
+- **Context.** Non-zero exit implies the JSON response may not exist, but agy
+  1.1.14 demonstrated that it can also carry the only useful diagnostic UUID
+  and error in a parseable JSON object while stderr is empty. Parsing that
+  envelope before the exit check preserves diagnostics without weakening the
+  acceptance checks. Exit 0 still does not imply
   that agy applied the prompt (§2.5). Review sanity before id capture keeps the
   two concerns orthogonal: a broken review aborts on its own merits,
   and a valid APPROVED review completes without depending on
@@ -616,7 +643,9 @@ Each decision below follows the same template:
 - **Decision.** Step 5 launch-failure retry is capped at 1 per round
   and does NOT consume the 5-round counter. The counter advances only
   when a *valid* review (one that passes §4.7 checks) has been
-  produced.
+  produced. For §4.15's exact marker-bound stream interruption, the same retry
+  continues the failed conversation; all other failures repeat the original
+  launch shape.
 - **Where in SKILL.md.** Step 5.
 - **Context.** A launch failure is an infrastructure issue, not a
   failed review. Counting it against the round budget would be
@@ -626,8 +655,10 @@ Each decision below follows the same template:
   - *Retry consumes a round.* Rejected: see above.
   - *Unlimited retries.* Rejected: creates an infinite loop on
     persistent infrastructure failure.
-- **Chosen because.** The one-retry cap bounds the cost; the
-  separate-counter rule preserves the user's 5-round expectation.
+- **Chosen because.** The one-retry cap bounds the cost; preserving an
+  interrupted conversation avoids paying to rediscover the same repository
+  state, while the separate-counter rule preserves the user's 5-round
+  expectation.
 - **Trade-offs accepted.** The retry counter lives in the lead's
   round-local reasoning — if an implementer treats it as global across
   rounds, retry budget is inconsistently available. Rules section of
@@ -660,7 +691,8 @@ Each decision below follows the same template:
 
 ### §4.14. Static-only reviewer execution boundary
 
-- **Decision.** Every initial, fresh-exec, and resume prompt contains the same
+- **Decision.** Every initial, fresh-exec, resume, and interruption-recovery
+  prompt contains the same
   `<review_method>` block: Antigravity may obtain the supplied diffs, read and
   search repository files, and trace code/data/control flow, but must not run
   repository-hygiene checks, builds, compilation, tests, linting, formatting,
@@ -700,6 +732,41 @@ Each decision below follows the same template:
   that the policy reaches every launch, but a future agy release with a portable
   per-run command allowlist would provide stronger enforcement and should be
   preferred after re-running §7.
+
+### §4.15. Marker-bound recovery for sticky interrupted streams
+
+- **Decision.** Treat only one agy 1.1.14 failure signature as resumable:
+  `status=ERROR`, empty response, generic agent-termination error, valid UUID,
+  current attempt marker in that UUID's transcript, and the exact
+  `The stream was interrupted` transcript error after the marker. Spend the
+  existing second invocation by resuming that UUID with a fresh attempt marker
+  and a compact static-only continuation prompt. Never start a third call.
+- **Acceptance guard.** A resumed conversation may keep its old `ERROR`
+  envelope. Accept it only when the returned UUID is unchanged, the response
+  passes the normal verdict/finding checks, and records after the recovery
+  marker contain no `ERROR_MESSAGE` and end in a completed
+  `PLANNER_RESPONSE` equal to the JSON response after stripping trailing CR/LF
+  from both values (agy adds one trailing newline to JSON). Surface a warning.
+  Every other non-`SUCCESS` result remains a launch failure.
+- **Where.** `references/runner.md` R4.0–R5; the main thread only receives the
+  normal result JSON and optional `user_warning`.
+- **Context.** Review `1787048123-58310427` failed twice because both retry
+  attempts discarded a valid conversation after an interrupted stream. A
+  manual `--conversation` continuation finished the review. agy then proved
+  that status is sticky by returning the same complete verdict on a clean
+  no-tool turn with exit 0 while retaining the prior `ERROR` envelope.
+- **Alternatives considered.** Accept any valid response under `status=ERROR`
+  was rejected because sandbox and tool failures can also produce plausible
+  partial reviews. Adding a third call was rejected because it breaks the
+  two-invocation budget. `--disable-slash-commands` was rejected because agy
+  explicitly disables `--mode plan` with it.
+- **Chosen because.** Positive marker binding, UUID equality, current-turn
+  transcript checks, and normal semantic review validation distinguish a
+  completed recovery turn from both a partial response and an unrelated
+  conversation without relaxing the ordinary fail-closed path.
+- **Trade-offs accepted.** The recovery depends on agy's persisted transcript
+  schema. Schema drift fails closed and leaves the JSON/transcript diagnostic
+  in the runner rather than accepting an uncertain review.
 
 ---
 
@@ -1007,6 +1074,33 @@ fallback. Exit status is preserved across response extraction with `agy_rc`.
 Validate that the intended prompt and conversation were applied using semantic
 output checks and stable identity, not transport status alone.
 
+### §6.10. 2026-08-18: agy 1.1.14 interrupted streams poison conversation status
+
+**Report.** Review `1787048123-58310427` exhausted its two attempts with exit
+1 and empty stderr, so main could report only `agy exited 1`. The saved JSON
+actually contained `status=ERROR`, a generic agent-termination error, an empty
+response, and a valid conversation UUID. Its transcript recorded repeated
+`The stream was interrupted` errors.
+
+**Verification.** `agy --version` returned 1.1.14. A short control prompt
+succeeded under the existing flags, excluding a generally broken model or
+`--mode plan`. Resuming the failed UUID continued the original repository
+inspection and produced a complete `VERDICT: APPROVED`. A following no-tool
+resume repeated that review with exit 0, but the JSON envelope still retained
+the earlier conversation-level `status=ERROR` and error text. Official headless
+docs confirm that `--conversation` is the explicit resume mechanism and JSON
+is a single result object. A separate probe showed that
+`--disable-slash-commands` makes `--mode plan` ineffective.
+
+**Mitigation.** R4 now parses non-zero JSON for diagnostics. The one internal
+retry resumes only the positively marker-bound interruption signature. Sticky
+ERROR is accepted only through §4.15's UUID, semantic-review, and current-turn
+transcript guards, with a user-visible warning.
+
+**Lesson.** A conversation-level status can remain poisoned after a later turn
+succeeds. Preserve fail-closed defaults, but validate the current turn directly
+when the transport exposes a stable conversation identity and transcript.
+
 ---
 
 ## §7. Smoke test protocol
@@ -1140,8 +1234,8 @@ rm -rf "${TMPBARE}"
 ### §7.5. Static transport regression guard
 
 ```bash
-rg -n 'agy --print "\$\(cat /tmp/agy-(resume-)?prompt-' references/runner.md
-# expect: exactly the initial/fresh and resume command lines
+rg -n 'agy --print "\$\(cat /tmp/agy-(resume-|recovery-)?prompt-' references/runner.md
+# expect: exactly the initial/fresh, resume, and recovery command lines
 
 if rg -n 'cat .*\|.*agy --print -|--continue --conversation' references/runner.md; then
   echo "obsolete agy transport found" >&2
@@ -1159,6 +1253,13 @@ test "$(rg -c '^Do not add a Verification section or report commands/checks as i
 # Runner must fail closed rather than launch agy without the policy.
 rg -n 'prompt body is missing or duplicates the required static-review policy' references/runner.md
 # expect: exactly one line
+
+# Interrupted-stream recovery must remain marker-bound and within the existing
+# retry budget. Expect every command below to exit 0.
+rg -n 'recoverable interrupted stream' references/runner.md
+rg -n 'The stream was interrupted\. Please continue the task you were working on\.' references/runner.md
+rg -n 'agy-recovery-prompt-\$\{REVIEW_ID\}' references/runner.md
+rg -n 'This is still the one and only retry' references/runner.md
 ```
 
 ### §7.6. Cleanup smoke artifacts
@@ -1166,6 +1267,7 @@ rg -n 'prompt body is missing or duplicates the required static-review policy' r
 ```bash
 rm -f /tmp/agy-prompt-${REVIEW_ID}.md \
       /tmp/agy-resume-prompt-${REVIEW_ID}.md \
+      /tmp/agy-recovery-prompt-${REVIEW_ID}.md \
       /tmp/agy-review-${REVIEW_ID}.md \
       /tmp/agy-stdout-${REVIEW_ID}.jsonl \
       /tmp/agy-stderr-${REVIEW_ID}.txt \
@@ -1195,6 +1297,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 |------|--------------|---------|----------|-------|
 | 2026-04-17 | Codex CLI 0.121.0 (pre-agy backend) | reference + container sandboxes | initial author + reviewers | Historical contract and the two-tier, attempt-scoped transcript binding were developed here; details retained in §6.6–§6.8. |
 | 2026-08-13 | agy 1.1.12 | Codex workspace | Codex | Reproduced the migrated stdin bug from review `1786638300-60419327`. Verified `--print "$(cat file)"`, JSON extraction, transcript marker binding, stable explicit resume, and exit-0/new-UUID behavior for a missing conversation. Real-diff dogfood also showed headless command auto-denial without `--dangerously-skip-permissions`, two `--sandbox` connection-reset failures, and `SUCCESS` without that unstable flag (§9.7). Updated §2, §6.9, and §7. |
+| 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Reproduced review `1787048123-58310427` as exit 1 + empty stderr + ERROR JSON + marker-bound interrupted transcript. Verified explicit UUID resume completes the review, later clean turns retain sticky ERROR state, a short ordinary plan-mode prompt succeeds, and `--disable-slash-commands` disables `--mode plan`. Added bounded conversation-preserving recovery (§4.15), JSON-aware diagnostics, and smoke guards. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1402,7 +1505,7 @@ The runner uses a two-channel protocol: the authoritative structured result is w
 
 ### §12.3 Retry budget — single owner
 
-Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
+Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation; every other failure repeats the original launch shape. Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
 
 **The full invariant:** *exactly 2 agy invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
 

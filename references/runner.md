@@ -55,7 +55,7 @@ If your message lacks the line entirely, main falls back to a filesystem Glob fo
 Rules:
 - `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
 - `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
-- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check and include the tail of stderr when stderr is non-empty.
+- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume).
 - Do NOT return the review text in the JSON. Main reads `review_file` directly.
@@ -125,6 +125,27 @@ python3 -c "import sys, json; print(json.load(sys.stdin).get('response', ''))" <
 exit "$agy_rc"
 ```
 
+For interrupted-stream recovery (Step R5), use the same resume command shape,
+but read `/tmp/agy-recovery-prompt-${REVIEW_ID}.md` and pass the positively
+bound `${RECOVERY_CONVERSATION_ID}` to `--conversation`:
+
+```bash
+cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
+  --conversation ${RECOVERY_CONVERSATION_ID} \
+  --model ${AGY_MODEL} --effort high \
+  --mode plan --dangerously-skip-permissions \
+  --output-format json --print-timeout 10m \
+  > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  2>/tmp/agy-stderr-${REVIEW_ID}.txt
+agy_rc=$?
+
+python3 -c "import sys, json; print(json.load(sys.stdin).get('response', ''))" < /tmp/agy-stdout-${REVIEW_ID}.jsonl > /tmp/agy-review-${REVIEW_ID}.md 2>/dev/null || true
+exit "$agy_rc"
+```
+
+This is still the one and only retry for the dispatch; it does not add a third
+agy invocation.
+
 Bash tool `timeout` parameter: `620000` (10 min + headroom).
 
 For `OPERATION=resume`:
@@ -154,9 +175,39 @@ Run each complete code block as ONE Bash tool call. The `agy_rc` capture and fin
 
 Do these in order. Stop and return as soon as one fails.
 
+**Check R4.0: Parse the diagnostic JSON envelope.** Opportunistically parse
+`/tmp/agy-stdout-${REVIEW_ID}.jsonl` as one JSON object before checking the
+process exit. Save `status`, `error`, `response`, and `conversation_id` when
+present. A parse failure is handled by R4.3 if the process otherwise succeeded;
+for a non-zero exit it simply means the launch diagnostic has no JSON fields.
+
+Classify the attempt as a **recoverable interrupted stream** only when ALL of
+these conditions hold:
+
+- `status` is `ERROR`;
+- `response` is absent, empty, or whitespace-only;
+- `error` is exactly `Agent execution terminated due to error.`;
+- `conversation_id` is a valid UUID;
+- for `OPERATION=resume`, that UUID equals the requested
+  `${AGY_CONVERSATION_ID}` and stderr does not contain the
+  missing-conversation warning;
+- the transcript at
+  `~/.gemini/antigravity-cli/brain/<conversation_id>/.system_generated/logs/transcript_full.jsonl`
+  exists, contains the current
+  `ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID}` marker, and contains
+  `Error: The stream was interrupted. Please continue the task you were working on.`
+  after that marker.
+
+This classification never accepts a review. It only permits R5 to spend the
+existing retry budget by continuing the marker-bound conversation instead of
+throwing its gathered context away. Save its UUID as
+`${RECOVERY_CONVERSATION_ID}` and its JSON error as `${RECOVERY_ORIGINAL_ERROR}`.
+
 **Check R4.1: Exit code.**
 - `124` → route to retry (Step R5). Same retry budget as any other failure — ONE retry per dispatch total. If retry also returns 124, write `{"result":"timeout",...}` and return. (Retrying on timeout keeps the 2-attempts-per-round invariant consistent across failure types; main treats timeout as terminal just like launch_failure.)
-- `≠ 0 and ≠ 124` → read `/tmp/agy-stderr-${REVIEW_ID}.txt`, route to retry (Step R5).
+- `≠ 0 and ≠ 124` on the first attempt + R4.0 classified a recoverable interrupted stream → route to the interrupted-stream branch of Step R5.
+- `≠ 0 and ≠ 124` during interrupted-stream recovery + the diagnostic JSON has a non-empty `response` → continue to R4.2/R4.3; the marker-bound stale-status guard below will decide whether it is usable.
+- Any other `≠ 0 and ≠ 124` → read `/tmp/agy-stderr-${REVIEW_ID}.txt`, route to retry (Step R5). Preserve parsed JSON `status` and `error` in the failure diagnostic even when stderr is empty.
 - `0` → proceed.
 
 **Check R4.2: Stderr sanity.** Read `/tmp/agy-stderr-${REVIEW_ID}.txt`.
@@ -164,13 +215,44 @@ Do these in order. Stop and return as soon as one fails.
 - File contains a line matching `^Error:` or `Failed to write` → route to retry (Step R5).
 - For `OPERATION=resume`, file contains a line matching `^warning: conversation .* not found$` → route to retry. agy 1.1.12 otherwise exits 0 and silently starts a new conversation.
 
-**Check R4.3: JSON and review sanity.** First parse `/tmp/agy-stdout-${REVIEW_ID}.jsonl` as one JSON object. Parse failure or `status != "SUCCESS"` → route to retry. (The `.jsonl` suffix is historical; agy `--output-format json` emits one object.) For `OPERATION=resume`, also require a valid `conversation_id` equal to the input `${AGY_CONVERSATION_ID}` before inspecting the verdict; a missing or different id routes to retry with `errors: "resume conversation id changed: requested <input>, got <captured-or-missing>"`. This check MUST run even when the response says `VERDICT: APPROVED`.
+**Check R4.3: JSON and review sanity.** Require `/tmp/agy-stdout-${REVIEW_ID}.jsonl` to parse as one JSON object. Parse failure → route to retry. (The `.jsonl` suffix is historical; agy `--output-format json` emits one object.)
+
+- `status == "SUCCESS"` → proceed normally.
+- On the interrupted-stream recovery attempt only, `status == "ERROR"` may be
+  the sticky status from the interrupted turn. Continue provisionally only if
+  `conversation_id` equals `${RECOVERY_CONVERSATION_ID}`, `error` equals
+  `${RECOVERY_ORIGINAL_ERROR}`, and `response` is non-empty. Set
+  `RECOVERY_STALE_STATUS_CANDIDATE=true`; this is NOT success yet.
+- Every other `status != "SUCCESS"` → route to retry. Include the parsed
+  `status` and `error` in the diagnostic.
+
+For `OPERATION=resume`, also require a valid `conversation_id` equal to the input `${AGY_CONVERSATION_ID}` before inspecting the verdict; a missing or different id routes to retry with `errors: "resume conversation id changed: requested <input>, got <captured-or-missing>"`. For interrupted-stream recovery, compare against `${RECOVERY_CONVERSATION_ID}` instead. This check MUST run even when the response says `VERDICT: APPROVED`.
 
 Only after the JSON checks pass, Read `/tmp/agy-review-${REVIEW_ID}.md`.
 - File missing or empty → route to retry (Step R5).
 - Does NOT contain a line matching `^VERDICT: (APPROVED|REVISE)$` → route to retry.
 - Verdict is `REVISE` AND file contains NO line matching `\[severity:\s*(critical|high|medium)` → route to retry (reviewer format drift).
+
+If `RECOVERY_STALE_STATUS_CANDIDATE=true`, read the exact recovery
+conversation transcript and find the LAST `USER_INPUT` record containing the
+current recovery marker. Inspect only records after that input. Require:
+
+1. no subsequent record has `type == "ERROR_MESSAGE"`; and
+2. the final subsequent `PLANNER_RESPONSE` has `status == "DONE"` and its
+   `content` equals the extracted JSON `response` after stripping trailing CR
+   and LF characters from both values. Do not normalize any other whitespace.
+
+If either condition fails, the recovery failed closed. If both pass, set
+`user_warning` to exactly:
+`agy recovered an interrupted response stream; agy retained the prior ERROR status, but the marker-bound recovery turn completed without a new transcript error and returned a valid review`
+and proceed. This narrow branch is the ONLY place where a non-`SUCCESS` JSON
+status may produce `result=success`.
+
 - Verdict is `APPROVED` → write this EXACT JSON object to `${RESULT_PATH}` and return the `RUNNER_RESULT_AT:` line:
+
+  For a normal `SUCCESS`, use `null` below. If the sticky-status recovery
+  guard passed, substitute the exact recovery-warning string from above for
+  that one `user_warning` value; never write a descriptive placeholder.
 
   ```json
   {
@@ -205,6 +287,10 @@ find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' -newer <ancho
 **Interpret the result by STDOUT, not exit code.** Split the command's stdout on newlines; count non-empty lines. Empty stdout means ZERO paths regardless of the pipeline's exit status (`find` returning no matches and `grep -l` matching nothing in found files both yield empty stdout with different exit codes; treat both as zero).
 
 - **Exactly one path** → extract the trailing UUID from the filename (the UUID is the directory name directly under `brain`, e.g. `.../brain/<UUID>/.system_generated/...`). For `OPERATION=resume`, require that UUID to equal the input `${AGY_CONVERSATION_ID}`; a mismatch routes to retry with the same `resume conversation id changed` diagnostic as the primary tier. Otherwise write this EXACT JSON object to `${RESULT_PATH}` (all 9 fields explicitly; do NOT leave any omitted or as literal placeholder like `"<uuid>"`):
+
+For the JSON shape below, use `user_warning: null` on normal success. If the
+sticky-status recovery guard passed, substitute the exact recovery-warning
+string from R4.3; never write a descriptive placeholder.
 
 ```json
 {
@@ -245,11 +331,36 @@ find ~/.gemini/antigravity-cli/brain -name 'transcript_full.jsonl' -newer <ancho
 
 You have at most ONE retry per dispatch. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
 
-On retry:
-1. Generate a NEW `ATTEMPT_ID` (the old one stays in the old rollout; we must not let the grep match it again).
-2. Rewrite the prompt file with the new marker (using the Write tool; the write itself bumps mtime — do NOT use Bash `touch`, which may be gated by inherited Plan Mode on the subagent).
-3. Re-launch (same Step R3 command, still `run_in_background: false`).
-4. Re-run checks R4.1–R4.4. **This is the second and final attempt.** On this re-run, any check's "route to retry" outcome becomes terminal — do NOT re-enter R5. Apply the terminal-result rule below (timeout if exit 124 again, else launch_failure).
+On retry, first generate a NEW `ATTEMPT_ID` (the old one stays in the old
+rollout; we must not let the grep match it again). Then choose exactly one
+branch:
+
+**A. Recoverable interrupted stream (R4.0 matched).** Write
+`/tmp/agy-recovery-prompt-${REVIEW_ID}.md` with the new marker first, followed
+by this compact continuation prompt:
+
+```text
+<review_method>
+Perform a static review only.
+Continue to use only the exact read-only git diff commands from the original task plus repository file read/search and static tracing.
+Do NOT execute any command whose purpose is to verify, build, or run the project.
+Do not run tests, builds, compilation, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers.
+Do not add a Verification section or report commands/checks as if you performed them.
+</review_method>
+
+The previous response stream was interrupted. Continue the SAME review from the evidence and task already in this conversation. Do not restart broad repository discovery. Return only the required Summary, Findings, and Verdict sections, ending with VERDICT: APPROVED or VERDICT: REVISE.
+```
+
+Launch it synchronously with the Step R3 recovery command using
+`${RECOVERY_CONVERSATION_ID}`. Set `INTERRUPTED_STREAM_RECOVERY=true`, extract
+the review, and run R4.0–R4.4 with the recovery-specific guards above.
+
+**B. Every other retryable failure.** Rewrite the operation's original prompt
+file with the new marker and re-launch with the same Step R3 command as before.
+
+Whichever branch is chosen, this is the second and final attempt. Any check's
+"route to retry" outcome now becomes terminal — do NOT re-enter R5. Apply the
+terminal-result rule below (timeout if exit 124 again, else launch_failure).
 
 If the second attempt also fails any check:
 - For `OPERATION=resume`: before writing the `launch_failure` result, **archive the diagnostic files** (main will need them for the fallback fresh-exec which reuses the same base paths):
@@ -265,7 +376,7 @@ Then write the result with `archived_stdout` and `archived_stderr` set to the `-
 
 Write the appropriate terminal result and return the `RUNNER_RESULT_AT: ...` line:
 - Second attempt exit was 124 → write `{"result":"timeout","errors":"agy exceeded 600s on both attempts", ...}` (9 fields, all others null as applicable).
-- Any other failure mode → write `launch_failure` with the failed-check diagnostic plus the stderr tail when non-empty (combined ≤500 chars) in `errors`. Do not replace a semantic diagnostic such as conversation-id mismatch or missing verdict with an empty stderr tail.
+- Any other failure mode → write `launch_failure` with the failed-check diagnostic, parsed JSON `status` / `error` when available, plus the stderr tail when non-empty (combined ≤500 chars) in `errors`. Do not replace a semantic diagnostic such as conversation-id mismatch or missing verdict with an empty stderr tail.
 In both cases, fill all 9 fields (set `archived_stdout`/`archived_stderr` only when the archival mv in the OPERATION=resume branch ran, else null; set `user_warning` null; set `verdict` null; set `review_file` to `/tmp/agy-review-${REVIEW_ID}.md` only if that file contains a valid VERDICT line, else null).
 
 ### Step R6: Cleanup
