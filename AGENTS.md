@@ -2,6 +2,14 @@
 
 Orientation for AI coding agents working on this repo.
 
+## Branch policy
+
+- `master` is the release branch. Every push to `master` deploys a new version.
+- Never commit or push directly to `master` unless the user explicitly requests
+  a release/deployment for the current task.
+- All development changes must be pushed to `rc` (or to a development branch
+  created from `rc` and then integrated into `rc`).
+
 ## What this is
 
 A Codex skill that orchestrates adversarial review: Codex writes an adversarial prompt, launches Antigravity CLI (agy) (model `gemini-3.7-flash`, reasoning effort High / high) as an external reviewer, shows the findings to the user, applies fixes, and iterates up to 5 rounds until approved. This is **not a regular codebase** — the product is a single instruction file (`SKILL.md`) executed by OpenAI Codex at runtime.
