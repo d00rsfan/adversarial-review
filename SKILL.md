@@ -1,13 +1,13 @@
 ---
 name: adversarial-review
-description: Adversarial AI code/plan review. Antigravity (model gemini-3.7-flash, effort high) reviews, Codex fixes, iterative loop until approved. Auto-detects plan/code/code-vs-plan mode.
+description: Adversarial AI code/plan review. Antigravity (model claude-opus-4-6-thinking, model-managed Thinking) reviews, Codex fixes, iterative loop until approved. Auto-detects plan/code/code-vs-plan mode.
 ---
 
 # Adversarial Code Review
 
 > **Platform:** Codex CLI only. This skill orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. Running this skill from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
 
-Sends current work for adversarial review through an external AI model (Antigravity CLI by default, model `gemini-3.7-flash`). Auto-detects what to review: **plan** or **code**. Codex fixes issues based on reviewer feedback and resubmits until approved. Maximum 5 rounds.
+Sends current work for adversarial review through an external AI model (Antigravity CLI by default, model `claude-opus-4-6-thinking`). Auto-detects what to review: **plan** or **code**. Codex fixes issues based on reviewer feedback and resubmits until approved. Maximum 5 rounds.
 
 ---
 
@@ -406,7 +406,7 @@ should remain in the body file sent to the runner.
 
 The skill supports overrides like `/adversarial-review model:gemini-3.7-flash`. At Step 1, capture:
 
-- `AGY_MODEL` — default `gemini-3.7-flash`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
+- `AGY_MODEL` — default `claude-opus-4-6-thinking`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
 
 These are passed into the runner YAML input block below.
 

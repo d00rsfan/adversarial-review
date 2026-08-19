@@ -12,7 +12,7 @@ The main thread dispatches you via the Agent tool. The prompt contains a YAML-li
 REVIEW_ID: <string, format "{unix_ts}-{8-digit}">
 REPO_ROOT: <absolute path, validated by main>
 OPERATION: initial | resume | fresh-exec
-AGY_MODEL: <e.g. gemini-3.7-flash>  # the model agy CLI launches
+AGY_MODEL: <e.g. claude-opus-4-6-thinking>  # the model agy CLI launches
 RUNNER_CONTRACT_PATH: <absolute path to scripts/runner_contract.py>
 PROMPT_BODY_PATH: <absolute path to file containing the review prompt body WITHOUT the session marker; main writes this before dispatch>
 ORIGINAL_PROMPT_BODY_PATH: <absolute path to immutable initial review prompt body>
@@ -106,10 +106,37 @@ quoted tags or quoted later copies of the boundary cannot corrupt the contract
 check.
 
 For `OPERATION=initial` or `OPERATION=fresh-exec`:
-- Write `/tmp/agy-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` followed by the body.
+- Write `/tmp/agy-prompt-${REVIEW_ID}.md` with first line `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->`, followed by the body, followed by the exact response-contract suffix below.
 
 For `OPERATION=resume`:
-- Write `/tmp/agy-resume-prompt-${REVIEW_ID}.md` with the same marker-first structure.
+- Write `/tmp/agy-resume-prompt-${REVIEW_ID}.md` with the same marker-first, body, response-contract-suffix structure.
+
+Append this suffix verbatim after the body for every initial, fresh-exec, and
+resume launch. Keeping it last makes the machine-checked output requirements
+the reviewer's final instruction instead of relying only on an earlier
+`<output_format>` block:
+
+```text
+<response_contract priority="highest">
+Return only the final review artifact. Do not narrate investigation progress,
+tool calls, delegation, or intermediate conclusions.
+
+The response must begin with `## Summary` and contain only these top-level
+sections in this order: `## Summary`, `## Findings`, `## Verdict`.
+
+For REVISE, every finding must be a full structured subsection whose heading
+is exactly `### [severity: critical] Title`, `### [severity: high] Title`, or
+`### [severity: medium] Title`. Under each heading include the fields required
+by the task's `<output_format>` and `<finding_bar>`. A severity table, bold
+`High`/`Medium` text, bullets, or a summary list does not satisfy this contract
+and must not replace the structured subsections.
+
+For APPROVED, write `No actionable findings.` under `## Findings`.
+
+Before returning, check that the final line is exactly one terminal verdict
+line and that every REVISE finding contains the literal token `[severity:`.
+</response_contract>
+```
 
 Use the Write tool (not `cat <<EOF` via Bash — Write is simpler and does not have quoting edge cases).
 
@@ -128,7 +155,7 @@ For `OPERATION=initial` and `OPERATION=fresh-exec`:
 ```bash
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
   --add-dir "${REPO_ROOT}" \
-  --model ${AGY_MODEL} --effort high \
+  --model ${AGY_MODEL} \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -148,7 +175,7 @@ bound `${RECOVERY_CONVERSATION_ID}` to `--conversation`:
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
   --conversation ${RECOVERY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
-  --model ${AGY_MODEL} --effort high \
+  --model ${AGY_MODEL} \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -170,7 +197,7 @@ For `OPERATION=resume`:
 cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation ${AGY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
-  --model ${AGY_MODEL} --effort high \
+  --model ${AGY_MODEL} \
   --mode plan --dangerously-skip-permissions \
   --output-format json --print-timeout 10m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -435,6 +462,22 @@ the review, and run R4.0–R4.4 with the recovery-specific guards above.
 **B. Every other retryable failure, including a read-only missing-file
 candidate that failed its completed-turn guard.** Rewrite the operation's original prompt
 file with the new marker and re-launch with the same Step R3 command as before.
+Preserve the response-contract suffix from Step R2.
+
+If the failure was reviewer format drift (REVISE without a matching
+`[severity: critical|high|medium]` finding), append this additional repair
+instruction after the response-contract suffix on the retry only:
+
+```text
+<format_repair priority="highest">
+The previous attempt was rejected because it summarized severities in a table
+or prose instead of emitting structured finding subsections. Reproduce the
+review as the final artifact only. Do not omit finding details and do not use a
+table as a substitute. Every finding heading must literally begin with
+`### [severity: critical]`, `### [severity: high]`, or
+`### [severity: medium]`.
+</format_repair>
+```
 
 Whichever branch is chosen, this is the second and final attempt. Any check's
 "route to retry" outcome now becomes terminal — do NOT re-enter R5. Apply the
