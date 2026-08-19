@@ -16,6 +16,9 @@ CONVERSATION = "12345678-1234-4234-9234-123456789abc"
 MARKER = "ADVERSARIAL-REVIEW-SESSION: 1700000000-12345678-654321"
 REVIEW_ID = "1700000000-12345678"
 REVIEW = "Summary\n\nFindings\n\nNo findings.\n\nVERDICT: APPROVED\n"
+RUNNER_SPEC = (Path(__file__).resolve().parents[1] / "references" / "runner.md").read_text(
+    encoding="utf-8"
+)
 
 
 def prompt(history: str = "") -> str:
@@ -25,6 +28,7 @@ Perform a static review only.
 Do NOT execute any command whose purpose is to verify, build, or run the project.
 Do not add a Verification section or report commands/checks as if you performed them.
 Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "*"` to enumerate a directory.
+Every `view_file` call MUST contain only `AbsolutePath`; never pass `StartLine`, `EndLine`, or any other line-range argument.
 </review_method>
 <repository_context>
 Absolute repository root: {ROOT}
@@ -76,6 +80,24 @@ class PromptContractTests(unittest.TestCase):
         )
         valid, _ = validate_prompt(body, ROOT, "initial", REVIEW_ID)
         self.assertFalse(valid)
+
+    def test_missing_view_file_contract_is_rejected(self) -> None:
+        body = prompt().replace(
+            "Every `view_file` call MUST contain only `AbsolutePath`; never pass `StartLine`, `EndLine`, or any other line-range argument.\n",
+            "",
+        )
+        valid, _ = validate_prompt(body, ROOT, "initial", REVIEW_ID)
+        self.assertFalse(valid)
+
+    def test_recovery_prompt_contains_native_tool_contract(self) -> None:
+        start = RUNNER_SPEC.index("**A. Recoverable interrupted stream (R4.0 matched).**")
+        end = RUNNER_SPEC.index("Launch it synchronously", start)
+        recovery_prompt = RUNNER_SPEC[start:end]
+        for required in (
+            'Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "*"` to enumerate a directory.',
+            "Every `view_file` call MUST contain only `AbsolutePath`; never pass `StartLine`, `EndLine`, or any other line-range argument.",
+        ):
+            self.assertIn(required, recovery_prompt)
 
 
 class RecoveredReadTests(unittest.TestCase):

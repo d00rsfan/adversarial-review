@@ -145,7 +145,10 @@ interrupted-stream behavior and completed-review/missing-file behavior were
 re-verified on `agy 1.1.14` on 2026-08-18 (see
 `§8. Version and verification log`). The stricter `find_by_name` argument
 contract and an ordinary initial review launch were verified on `agy 1.1.17`
-on 2026-08-21; the older resume edge cases were not re-run for that release.
+on 2026-08-21. An Opus-backed launch on the same version later reported that
+`view_file` rejects `StartLine`; that diagnostic was covered statically without
+another reviewer launch at the user's request. The older resume edge cases
+were not re-run for that release.
 The prior text in this section was
 mechanically inherited from Codex CLI 0.121.0 during the agy migration;
 those Codex-specific flags and stream semantics were never valid agy facts.
@@ -297,6 +300,7 @@ every successful REVISE response so a future rotation cannot silently drift.
 | Clean turn after an interrupted 1.1.14 conversation | 0 observed | complete response but sticky ERROR/error | empty observed | accepted only by §4.15's current-turn transcript guard |
 | Recovered read-only `view_file` ENOENT | 0 observed | complete response plus ERROR/invalid_args and valid UUID | empty observed | accepted only by §4.16's marker-bound completed-turn guard and warning |
 | 1.1.17 `find_by_name` without `Pattern` | 0 observed | complete response plus ERROR/`missing property 'Pattern'` and valid UUID | empty observed | rejected; §4.17 prevents the malformed call in reviewer prompts |
+| 1.1.17 `view_file` with `StartLine` | not captured | user-reported `invalid arguments: additional properties 'StartLine' not allowed` | not captured | rejected; §4.18 restricts reviewer prompts to the known-valid `AbsolutePath`-only shape |
 | Malformed JSON or empty response | may be 0 | malformed/empty | may be empty | empty review; rejected |
 
 The semantic verdict check remains mandatory even after exit 0 because the
@@ -335,6 +339,11 @@ application success.
   reviewer prompt therefore states the required argument explicitly, using
   `Pattern: "*"` for directory enumeration, and the deterministic prompt
   contract requires that instruction before launch.
+- agy 1.1.17 rejects `StartLine` as an additional `view_file` property. The
+  skill uses the known-valid minimal call shape containing only `AbsolutePath`
+  and explicitly forbids `StartLine`, `EndLine`, and other line-range
+  properties in every reviewer prompt. The deterministic prompt contract
+  requires this instruction before launch.
 
 ---
 
@@ -872,8 +881,9 @@ Each decision below follows the same template:
   to tell the reviewer that `find_by_name` needs a non-empty `Pattern`, with
   `Pattern: "*"` for directory enumeration. Make the deterministic prompt
   validator require the same exact anchor before the review-scoped boundary.
-- **Where.** All three `<review_method>` templates in `SKILL.md`, the R2 prompt
-  check in `references/runner.md`, and deterministic fixtures in
+- **Where.** All three `<review_method>` templates in `SKILL.md`, the compact
+  interrupted-stream recovery prompt and R2 prompt check in
+  `references/runner.md`, and deterministic fixtures in
   `scripts/test_runner_contract.py`.
 - **Context.** Review `1787304800-73194628` under agy 1.1.17 issued a
   repository-local, read-only `find_by_name` call without `Pattern`. The model
@@ -892,6 +902,34 @@ Each decision below follows the same template:
 - **Trade-offs accepted.** This remains a model-facing compatibility rule. A
   future native-tool schema change will fail closed and require another
   versioned prompt-contract update.
+
+### §4.18. Restrict agy 1.1.17 `view_file` calls to the known-valid shape
+
+- **Decision.** Require every initial, fresh-exec, resume, and recovery prompt
+  to tell the reviewer that `view_file` calls contain only `AbsolutePath` and
+  must not include `StartLine`, `EndLine`, or any other line-range property.
+  Make the deterministic prompt validator require the same exact anchor before
+  the review-scoped boundary.
+- **Where.** All three `<review_method>` templates in `SKILL.md`, the compact
+  interrupted-stream recovery prompt and R2 prompt check in
+  `references/runner.md`, and deterministic fixtures in
+  `scripts/test_runner_contract.py`.
+- **Context.** An Opus-backed review under agy 1.1.17 attempted a `view_file`
+  call with `StartLine`. The native schema rejected it with
+  `invalid arguments: additional properties 'StartLine' not allowed`. The
+  Gemini-backed `master` flow already used the minimal `AbsolutePath`-only
+  shape successfully, but did not constrain other reviewer models to do so.
+- **Alternatives considered.** Accepting a completed-looking response after
+  this error was rejected because the top-level failure remains authoritative.
+  Teaching a replacement range field was rejected because no such field is
+  documented or needed: the reviewer can search first and then read the file
+  through the known-valid minimal shape.
+- **Chosen because.** The launch contract prevents the malformed call before
+  it can poison the result envelope, while retaining all file-inspection
+  capability needed by a static review.
+- **Trade-offs accepted.** `view_file` cannot be line-windowed by the reviewer;
+  large-file narrowing must use search. This remains a model-facing
+  compatibility rule and must be re-verified if agy's native schema changes.
 
 ---
 
@@ -1432,6 +1470,7 @@ test "$(rg -c '^Perform a static review only\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do NOT execute any command whose purpose is to verify, build, or run the project\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do not add a Verification section or report commands/checks as if you performed$' SKILL.md)" -eq 3
 test "$(rg -c '^Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "\*"` to enumerate a directory\.$' SKILL.md)" -eq 3
+test "$(rg -c '^Every `view_file` call MUST contain only `AbsolutePath`; never pass `StartLine`, `EndLine`, or any other line-range argument\.$' SKILL.md)" -eq 3
 test "$(rg -c '^<repository_context>$' SKILL.md)" -eq 3
 test "$(rg -c '^</repository_context>$' SKILL.md)" -eq 3
 test "$(rg -c '^Absolute repository root: <repo-root>$' SKILL.md)" -eq 3
@@ -1463,7 +1502,7 @@ rg -n 'the ONLY cases where a non-`SUCCESS` JSON status may' references/runner.m
 # evidence, successful same-filename recovery, transcript errors/mismatch, and
 # quoted contract tags in fresh-exec history.
 python3 scripts/test_runner_contract.py
-# expect: 20 tests, OK
+# expect: 22 tests, OK
 
 # The self dispatcher must remain terminal and read-only before every
 # external-backend action.
@@ -1511,6 +1550,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-08-18 | agy 1.1.14 | deterministic fixtures + Codex workspace | Codex + independent adversarial review | Tightened §4.16 after adversarial review: exit 0 only, canonical containment, immutable original-task evidence, structurally bound same-filename read recovery, exact transcript completion, and contract/history-safe prompt validation now run in `scripts/runner_contract.py`; targeted negative fixtures cover those added boundaries. |
 | 2026-08-20 | not invoked (self backend) | deterministic fixtures + Codex workspace | Codex | Added the terminal standalone `self` dispatcher, read-only local review workflow, and static regression contract. Existing agy transport remained unchanged. |
 | 2026-08-21 | agy 1.1.17 | deterministic fixtures + Gelius CRP code-vs-plan dogfood | Codex + Antigravity | Diagnosed review `1787304800-73194628`: `find_by_name` omitted its newly required `Pattern`, then a corrected call and complete APPROVED response still left the envelope at `ERROR`. Added the prompt-contract rule in §4.17 and its negative fixture. Review `1787309661-80826937` then completed through the ordinary `SUCCESS` path with `VERDICT: APPROVED` and no recovery warning. Resume edge cases were not re-run. |
+| 2026-08-21 | agy 1.1.17 (not re-invoked) | user diagnostic + deterministic fixtures | Codex | An Opus-backed launch reported `additional properties 'StartLine' not allowed` for a native file read while the Gemini-backed master flow worked. Added the `view_file` `AbsolutePath`-only prompt contract (§4.18), a negative fixture, and recovery-prompt coverage for both native-tool rules. Per user request, no reviewer launch or Opus tokens were used to verify the fix. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.

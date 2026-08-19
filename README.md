@@ -316,6 +316,13 @@ rejects a launch if the instruction is absent. The runner does not accept a
 completed-looking response whose top-level status remains `ERROR` after a
 malformed call.
 
+**Antigravity reports `additional properties 'StartLine' not allowed`.**
+The known-valid agy 1.1.17 `view_file` call shape contains only `AbsolutePath`.
+Some reviewer models may invent unsupported line-range fields such as
+`StartLine` or `EndLine`. Every external review prompt forbids those fields,
+and the deterministic prompt contract rejects a launch if that protection is
+missing.
+
 **Antigravity returns a valid review together with a missing-file ERROR.**
 agy 1.1.14 may retain a recovered `view_file` ENOENT as top-level
 `status: ERROR` even after the current turn ends with a complete verdict. The
