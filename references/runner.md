@@ -100,7 +100,8 @@ contains the helper's `reason`, return the `RUNNER_RESULT_AT:` line, and do NOT
 launch or retry agy. The helper checks exactly one static-review policy and
 repository-context block before the first review-scoped
 `<!-- ADVERSARIAL-REVIEW-CONTRACT: ${REVIEW_ID} -->` boundary, including all
-policy anchors and one exact absolute-root line. Task artifacts, resume fix
+policy anchors, the agy 1.1.17 `find_by_name` argument requirement, and one
+exact absolute-root line. Task artifacts, resume fix
 summaries, and verbatim history occur after that unpredictable boundary, so
 quoted tags or quoted later copies of the boundary cannot corrupt the contract
 check.

@@ -69,20 +69,23 @@ If you are about to modify the skill:
 
 ### One paragraph
 
-`adversarial-review` is a Codex skill. The user types
-`/adversarial-review` in a Codex session; Codex (the "lead/master")
-writes an adversarial review prompt to a temp file, launches
-`agy --print` with that file's contents as one prompt argument, and
-extracts `.response` from the JSON result. Codex then shows the review to the
-user verbatim, applies fixes to the plan or code, and re-submits the
-revised state to the reviewer through `agy --conversation <UUID>`. The loop
-runs up to five rounds, or until the reviewer emits
-`VERDICT: APPROVED`.
+`adversarial-review` is a Codex skill with two backends. With the standalone
+`self` argument, Codex takes a terminal branch before any external setup and
+performs a read-only adversarial review in the current thread. Otherwise Codex
+(the "lead/master") writes an adversarial review prompt to a temp file,
+launches `agy --print` with that file's contents as one prompt argument, and
+extracts `.response` from the JSON result. Codex then shows the external review
+to the user verbatim, applies fixes to the plan or code, and re-submits the
+revised state through `agy --conversation <UUID>`. The external loop runs up to
+five rounds, or until the reviewer emits `VERDICT: APPROVED`.
 
 ### Roles
 
 - **Lead (Codex).** Orchestrator. Reads `SKILL.md`, runs the Bash /
   Write / Read / Edit tools, authors the fixes, decides when to stop.
+- **Self reviewer (Codex, opt-in).** The same current thread applies the
+  adversarial rubric directly. It does not delegate, invoke agy, or apply
+  fixes.
 - **Reviewer (Antigravity, `gemini-3.7-flash`, effort high).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in agy plan mode,
   and emits a structured review with `VERDICT:`. See §9.7 for the
@@ -94,7 +97,11 @@ runs up to five rounds, or until the reviewer emits
 
 ```mermaid
 flowchart TD
-    A[launch: agy --output-format json] --> B{checks: exit, stderr, review file}
+    START{standalone self token?}
+    START -- yes --> SELF[self-review in current Codex thread]
+    SELF --> SDONE([return report])
+    START -- no --> A[launch: agy --output-format json]
+    A --> B{checks: exit, stderr, review file}
     B -- fail --> RETRY{retry budget}
     RETRY -- yes --> A
     RETRY -- no --> ABORT([abort, leave temp files])
@@ -125,16 +132,21 @@ An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
 (Antigravity CLI with `gemini-3.7-flash`, effort high) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
-this document exists to manage.
+this document exists to manage. Self mode is an explicit convenience trade-off:
+it preserves the rubric and review discipline when external execution is
+undesired or unavailable, but does not claim independent-model diversity.
 
 ---
 
-## §2. Antigravity CLI empirical facts (verified on v1.1.12 and v1.1.14)
+## §2. Antigravity CLI empirical facts (v1.1.12 through v1.1.17)
 
 The transport contract was verified on `agy 1.1.12` on 2026-08-13. The
 interrupted-stream behavior and completed-review/missing-file behavior were
 re-verified on `agy 1.1.14` on 2026-08-18 (see
-`§8. Version and verification log`). The prior text in this section was
+`§8. Version and verification log`). The stricter `find_by_name` argument
+contract and an ordinary initial review launch were verified on `agy 1.1.17`
+on 2026-08-21; the older resume edge cases were not re-run for that release.
+The prior text in this section was
 mechanically inherited from Codex CLI 0.121.0 during the agy migration;
 those Codex-specific flags and stream semantics were never valid agy facts.
 Re-run `§7` after upgrading agy.
@@ -284,6 +296,7 @@ every successful REVISE response so a future rotation cannot silently drift.
 | 1.1.14 interrupted model stream | 1 observed | ERROR JSON, empty response, valid UUID | empty observed | marker-bound conversation recovery uses the one retry |
 | Clean turn after an interrupted 1.1.14 conversation | 0 observed | complete response but sticky ERROR/error | empty observed | accepted only by §4.15's current-turn transcript guard |
 | Recovered read-only `view_file` ENOENT | 0 observed | complete response plus ERROR/invalid_args and valid UUID | empty observed | accepted only by §4.16's marker-bound completed-turn guard and warning |
+| 1.1.17 `find_by_name` without `Pattern` | 0 observed | complete response plus ERROR/`missing property 'Pattern'` and valid UUID | empty observed | rejected; §4.17 prevents the malformed call in reviewer prompts |
 | Malformed JSON or empty response | may be 0 | malformed/empty | may be empty | empty review; rejected |
 
 The semantic verdict check remains mandatory even after exit 0 because the
@@ -316,6 +329,12 @@ application success.
   `--mode plan` prints `--mode plan has no effect while slash command expansion
   is disabled`. The runner does not use that apparent transport workaround
   because it would silently remove the additional plan-mode guard.
+- agy 1.1.17 requires a non-empty `Pattern` in every native `find_by_name`
+  call. Omitting it can leave the top-level envelope at `status=ERROR` even if
+  the reviewer corrects the call and later produces a complete verdict. Every
+  reviewer prompt therefore states the required argument explicitly, using
+  `Pattern: "*"` for directory enumeration, and the deterministic prompt
+  contract requires that instruction before launch.
 
 ---
 
@@ -846,6 +865,33 @@ Each decision below follows the same template:
 - **Trade-offs accepted.** Changes in agy's error wording fail closed until
   re-verified. The guard intentionally does not cover failed commands, writes,
   permission denials, paths outside the repository, or other tools.
+
+### §4.17. Pin the agy 1.1.17 `find_by_name` argument contract in every prompt
+
+- **Decision.** Require every initial, fresh-exec, resume, and recovery prompt
+  to tell the reviewer that `find_by_name` needs a non-empty `Pattern`, with
+  `Pattern: "*"` for directory enumeration. Make the deterministic prompt
+  validator require the same exact anchor before the review-scoped boundary.
+- **Where.** All three `<review_method>` templates in `SKILL.md`, the R2 prompt
+  check in `references/runner.md`, and deterministic fixtures in
+  `scripts/test_runner_contract.py`.
+- **Context.** Review `1787304800-73194628` under agy 1.1.17 issued a
+  repository-local, read-only `find_by_name` call without `Pattern`. The model
+  corrected the call with `Pattern: "*"` and completed an APPROVED response,
+  but the JSON envelope retained `status=ERROR` with
+  `invalid arguments: missing property 'Pattern'`, so the fail-closed runner
+  correctly rejected the review.
+- **Alternatives considered.** Accepting any complete-looking response with
+  this top-level error was rejected because official headless semantics define
+  non-`SUCCESS` as failure and response plausibility does not prove a clean
+  turn. A transcript allowlist was rejected because preventing the malformed
+  call is simpler and preserves the existing strict envelope contract.
+- **Chosen because.** The instruction directly supplies the newly required
+  argument, applies to the only observed incompatible tool, and is enforced
+  before agy launches rather than repaired after a failed turn.
+- **Trade-offs accepted.** This remains a model-facing compatibility rule. A
+  future native-tool schema change will fail closed and require another
+  versioned prompt-contract update.
 
 ---
 
@@ -1385,6 +1431,7 @@ test "$(rg -c '^</review_method>$' SKILL.md)" -eq 3
 test "$(rg -c '^Perform a static review only\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do NOT execute any command whose purpose is to verify, build, or run the project\.$' SKILL.md)" -eq 3
 test "$(rg -c '^Do not add a Verification section or report commands/checks as if you performed$' SKILL.md)" -eq 3
+test "$(rg -c '^Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "\*"` to enumerate a directory\.$' SKILL.md)" -eq 3
 test "$(rg -c '^<repository_context>$' SKILL.md)" -eq 3
 test "$(rg -c '^</repository_context>$' SKILL.md)" -eq 3
 test "$(rg -c '^Absolute repository root: <repo-root>$' SKILL.md)" -eq 3
@@ -1416,7 +1463,12 @@ rg -n 'the ONLY cases where a non-`SUCCESS` JSON status may' references/runner.m
 # evidence, successful same-filename recovery, transcript errors/mismatch, and
 # quoted contract tags in fresh-exec history.
 python3 scripts/test_runner_contract.py
-# expect: 19 tests, OK
+# expect: 20 tests, OK
+
+# The self dispatcher must remain terminal and read-only before every
+# external-backend action.
+python3 scripts/test_self_mode_contract.py
+# expect: 5 tests, OK
 ```
 
 ### §7.6. Cleanup smoke artifacts
@@ -1457,6 +1509,8 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Reproduced review `1787048123-58310427` as exit 1 + empty stderr + ERROR JSON + marker-bound interrupted transcript. Verified explicit UUID resume completes the review, later clean turns retain sticky ERROR state, a short ordinary plan-mode prompt succeeds, and `--disable-slash-commands` disables `--mode plan`. Added bounded conversation-preserving recovery (§4.15), JSON-aware diagnostics, and smoke guards. |
 | 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Diagnosed review `1787067240-58420371`: native `run_command` started in agy's scratch despite process `cd`; a recovered root-manifest ENOENT left `status=ERROR` beside a transcript-complete APPROVED response. Added layered root binding (§4.3), allowlisted marker-bound completion (§4.16), and dogfood/static regression guards. |
 | 2026-08-18 | agy 1.1.14 | deterministic fixtures + Codex workspace | Codex + independent adversarial review | Tightened §4.16 after adversarial review: exit 0 only, canonical containment, immutable original-task evidence, structurally bound same-filename read recovery, exact transcript completion, and contract/history-safe prompt validation now run in `scripts/runner_contract.py`; targeted negative fixtures cover those added boundaries. |
+| 2026-08-20 | not invoked (self backend) | deterministic fixtures + Codex workspace | Codex | Added the terminal standalone `self` dispatcher, read-only local review workflow, and static regression contract. Existing agy transport remained unchanged. |
+| 2026-08-21 | agy 1.1.17 | deterministic fixtures + Gelius CRP code-vs-plan dogfood | Codex + Antigravity | Diagnosed review `1787304800-73194628`: `find_by_name` omitted its newly required `Pattern`, then a corrected call and complete APPROVED response still left the envelope at `ERROR`. Added the prompt-contract rule in §4.17 and its negative fixture. Review `1787309661-80826937` then completed through the ordinary `SUCCESS` path with `VERDICT: APPROVED` and no recovery warning. Resume edge cases were not re-run. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1698,3 +1752,55 @@ The attempt-scoped `ADVERSARIAL-REVIEW-SESSION` marker (round-7 finding) and pos
 3. If Plan Mode propagates, does the subagent's Write (for the repeat-Write mtime bump) fail, prompt, or succeed silently?
 
 **After Task 7 Step 4 runs, REWRITE this subsection with the observed answers.** Delete the hypothesis framing and state the observed behavior as fact. Until then, anyone reading §12.7 should understand it is speculative.
+
+---
+
+## §13. Self-review backend
+
+### §13.1. Why this is a backend, not a second skill
+
+The self path reuses the same trigger, plan/code scopes, finding bar, and
+verdict vocabulary as adversarial review, while accepting other explicit
+targets from the user's request. A separate skill would duplicate discovery
+language and make users remember which review command to invoke. A standalone
+`self` token makes the reviewer choice explicit while keeping one reusable
+workflow. Substring matching is rejected so a file path or prose that happens
+to contain `self` cannot silently change backends.
+
+### §13.2. Terminal early dispatch
+
+The self dispatcher is intentionally before placeholder resolution and Step 1.
+This placement is a safety boundary, not a presentation choice: once `self` is
+selected, no REVIEW_ID, runner path, subagent, agy check, or `/tmp/agy-*`
+artifact is needed. The workflow must stop on target-resolution, inspection, or
+verification failure; falling back to the external backend would violate the
+user's explicit backend selection.
+
+`model:*` is rejected rather than ignored because it expresses a conflicting
+request for an external reviewer. The deterministic
+`scripts/test_self_mode_contract.py` guard makes dispatcher ordering and the
+no-fallthrough wording load-bearing.
+
+### §13.3. Read-only self review
+
+Self mode separates review from remediation. It does not inherit the external
+backend's automatic Step-6 fixes because the same thread is already serving as
+reviewer and because a review request does not imply authorization to edit the
+user's worktree. A later explicit implementation request can authorize fixes
+as a separate task.
+
+### §13.4. Scope and output
+
+Self mode accepts the same plan/code scopes as the external backend plus an
+explicit target from the user's request. It starts from the exact diff, plan,
+or artifact, reads additional context only for concrete hypotheses, and returns
+the standard Summary, Findings, Verification, and Verdict sections. Any
+actionable finding produces `VERDICT: REVISE`.
+
+### §13.5. Deliberate limitation
+
+Self mode cannot remove same-model validation bias; §1's rationale for the
+external backend still holds. Its value is predictable no-external-reviewer
+execution, lower orchestration overhead, and direct use of Codex's repository
+access. The report names itself “Self Adversarial Review” so the source of
+judgment is not confused with independent Antigravity approval.

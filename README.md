@@ -2,7 +2,10 @@
 
 Codex skill for adversarial AI code and plan review.
 
-One AI writes the code (Codex master). Another tears it apart (Antigravity `gemini-3.7-flash`, high effort reviewer). Iterate until approved.
+By default, one AI writes the code (Codex master) and another tears it apart
+(Antigravity `gemini-3.7-flash`, high effort reviewer). Add `self` when the
+current Codex thread should perform the adversarial review itself without
+launching `agy` or a reviewer subagent.
 
 ## What is this
 
@@ -11,10 +14,10 @@ Adversarial review does the opposite: the reviewer **defaults to skepticism**
 and tries to break confidence in the change. It looks for what will fail
 in production, not what might be nice to improve.
 
-This is a Codex skill — `SKILL.md`, a small `references/runner.md`, and a
-standard-library Python contract validator that together teach OpenAI Codex how
-to run adversarial reviews through Antigravity CLI (agy) (model
-`gemini-3.7-flash`, reasoning effort `high`).
+This is a Codex skill. `SKILL.md` dispatches either to the self-review workflow
+in `references/self-review.md`, or to `references/runner.md` plus a
+standard-library Python contract validator for reviews through Antigravity CLI
+(agy) (model `gemini-3.7-flash`, reasoning effort `high`).
 
 ## Key features
 
@@ -22,6 +25,9 @@ to run adversarial reviews through Antigravity CLI (agy) (model
   mistakes, missing steps, and risks early
 - **Code review** — review the implementation. Bugs, security, data loss
 - **Code-vs-plan** — verify the implementation matches the plan
+- **Self review** — add the standalone `self` argument to keep review judgment
+  in the current Codex thread; no `agy`, runner, reviewer subagent, or
+  `/tmp/agy-*` artifacts
 - **Static-only reviewer** — Antigravity reads diffs and source, searches
   references, and traces code paths, but does not build, compile, test, lint,
   format, install dependencies, or run project code
@@ -32,6 +38,8 @@ to run adversarial reviews through Antigravity CLI (agy) (model
   packages.
 
 ## How it works
+
+The default external backend uses this loop:
 
 ```
 ┌─────────┐     ┌──────────┐     ┌─────────┐
@@ -47,6 +55,10 @@ to run adversarial reviews through Antigravity CLI (agy) (model
               VERDICT: APPROVED
 ```
 
+With `$adversarial-review self`, the current Codex thread performs the same
+adversarial inspection directly and returns one read-only report. It never
+enters the external loop.
+
 ### Three modes
 
 | Mode | What it reviews | When to use |
@@ -61,20 +73,23 @@ Mode is auto-detected from context, or you can force it with an argument.
 
 ### 1. Prerequisites
 
-[OpenAI Codex CLI](https://github.com/openai/codex),
-[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`), and Python
-3.10 or newer must be installed. The validator uses only Python's standard
-library.
+[OpenAI Codex CLI](https://github.com/openai/codex) is required. Python 3.10 or
+newer is used by the repository's deterministic validators. The default
+external backend additionally requires
+[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`); self mode does
+not.
 
-Verify all three are available:
+Verify the tools for the backend you intend to use:
 
 ```bash
-codex --version  # OpenAI Codex CLI
-agy --version    # Antigravity CLI
-python3 --version  # Python 3.10+
+codex --version    # required
+python3 --version  # repository validators
+agy --version      # external backend only; omit for self mode
 ```
 
-**Authentication.** Antigravity needs API credentials. Either set `GEMINI_API_KEY` env var or sign in via Antigravity CLI.
+**External-backend authentication.** Antigravity needs API credentials. Either
+set `GEMINI_API_KEY` or sign in via Antigravity CLI. Self mode does not use
+these credentials.
 
 ### 2. Install the skill
 
@@ -85,14 +100,16 @@ mkdir -p ~/.codex/skills
 ln -sfn "$(pwd)" ~/.codex/skills/adversarial-review
 ```
 
-Verify the skill entry point, runner spec, and executable contract helper are
-all in place:
+Verify the skill entry point, both workflow specs, and executable contract
+helpers are all in place:
 
 ```bash
 ls -la ~/.codex/skills/adversarial-review/SKILL.md
+ls -la ~/.codex/skills/adversarial-review/references/self-review.md
 ls -la ~/.codex/skills/adversarial-review/references/runner.md
 ls -la ~/.codex/skills/adversarial-review/scripts/runner_contract.py
 python3 ~/.codex/skills/adversarial-review/scripts/runner_contract.py --help
+python3 ~/.codex/skills/adversarial-review/scripts/test_self_mode_contract.py
 ```
 
 > **Migrating from a previous install at `~/.claude/skills/` or `~/.agents/skills/`**: delete
@@ -101,9 +118,12 @@ python3 ~/.codex/skills/adversarial-review/scripts/runner_contract.py --help
 
 ### 3. Add permissions
 
-The skill runs `git`, `agy`, the installed standard-library Python helper, and
-writes temp files to `/tmp`.
-Without pre-approved permissions, Codex will prompt for each action.
+Self mode needs ordinary read-only repository access. It does not run `agy`,
+the runner helper, or create `/tmp/agy-*` files.
+
+The external backend runs `git`, `agy`, the installed standard-library Python
+helper, and writes temp files to `/tmp`. Without pre-approved permissions,
+Codex will prompt for each action.
 
 Permissions should go into `~/.codex/settings.json` (global) or project settings:
 
@@ -225,11 +245,18 @@ rule and approve each invocation manually.
 /adversarial-review code                  # force code review
 /adversarial-review path/to/f             # review a specific file
 /adversarial-review model:gemini-3.7-flash # specify agy model
+$adversarial-review self                   # Codex reviews directly; no agy/subagent
+$adversarial-review self code              # self-review local code changes
+$adversarial-review self <target>          # self-review an explicit target
 ```
+
+`self` is a standalone token. `model:*` is intentionally incompatible with
+self mode because it selects an external reviewer.
 
 ## Prompt architecture
 
-The skill uses XML-structured prompts with adversarial stance:
+The external backend uses XML-structured prompts, while self mode applies the
+same adversarial stance directly from `references/self-review.md`:
 
 - **`<role>`** — adversarial reviewer, defaults to skepticism
 - **`<operating_stance>`** — break confidence, not validate
@@ -247,6 +274,12 @@ The skill uses XML-structured prompts with adversarial stance:
 See [examples/review-output.md](examples/review-output.md) for a sample review.
 
 ## Troubleshooting
+
+**`self` unexpectedly starts the external reviewer.**
+Update the installed skill and ensure `self` is a standalone invocation token,
+not part of a path or sentence. Run
+`python3 scripts/test_self_mode_contract.py`; the test fails if the dispatcher
+can fall through to the external Steps 1–9.
 
 **Antigravity execution exits with model error.**
 Ensure `GEMINI_API_KEY` is exported or Antigravity CLI is authenticated.
@@ -274,6 +307,14 @@ recovery turn; the runner accepts that result only when the error value is
 unchanged, the conversation ID matches, the recovery response has a valid
 verdict, and the marker-bound recovery turn has no new transcript error. A
 one-line warning is shown before the recovered review.
+
+**Antigravity reports `missing property 'Pattern'`.**
+agy 1.1.17 requires every native `find_by_name` call to include a non-empty
+`Pattern`, including directory listings (`Pattern: "*"`). Every external
+review prompt carries this requirement, and the deterministic prompt contract
+rejects a launch if the instruction is absent. The runner does not accept a
+completed-looking response whose top-level status remains `ERROR` after a
+malformed call.
 
 **Antigravity returns a valid review together with a missing-file ERROR.**
 agy 1.1.14 may retain a recovered `view_file` ENOENT as top-level
@@ -334,6 +375,10 @@ review correctness.
 
 ## Known limitations
 
+- **Same-model bias in self mode.** Self review removes the external dependency
+  and delegation overhead, but it does not provide the independent-model
+  perspective of the default Antigravity backend. Use the external backend
+  when diversity of blind spots matters more than speed or availability.
 - **Plan Mode and `/tmp` writes.** Writing review prompts to `/tmp` may trigger
   a permission prompt or cause Plan Mode to exit. Does not affect review correctness.
 - **Headless agy tool approvals.** The runner uses `--mode plan` and explicit

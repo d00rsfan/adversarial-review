@@ -61,6 +61,7 @@ def validate_prompt(
         "Perform a static review only.",
         "Do NOT execute any command whose purpose is to verify, build, or run the project.",
         "Do not add a Verification section or report commands/checks as if you performed",
+        "Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: \"*\"` to enumerate a directory.",
     )
     if trusted.count("<review_method>") != 1 or trusted.count("</review_method>") != 1:
         return False, "trusted prompt header is missing or duplicates the static-review policy"

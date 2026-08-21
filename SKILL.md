@@ -1,13 +1,13 @@
 ---
 name: adversarial-review
-description: Adversarial AI code/plan review. Antigravity (model gemini-3.7-flash, effort high) reviews, Codex fixes, iterative loop until approved. Auto-detects plan/code/code-vs-plan mode.
+description: Adversarial code/plan review with two backends. By default Antigravity (model gemini-3.7-flash, effort high) reviews and Codex fixes iteratively; add the standalone self argument for a Codex-only review that never launches agy or a reviewer subagent. Auto-detects plan/code/code-vs-plan mode.
 ---
 
 # Adversarial Code Review
 
-> **Platform:** Codex CLI only. This skill orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. Running this skill from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
+> **Platform:** Codex CLI only. The default backend orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. The `self` backend keeps the entire review in the current Codex thread and never launches Antigravity or a reviewer subagent. Running the default backend from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
 
-Sends current work for adversarial review through an external AI model (Antigravity CLI by default, model `gemini-3.7-flash`). Auto-detects what to review: **plan** or **code**. Codex fixes issues based on reviewer feedback and resubmits until approved. Maximum 5 rounds.
+Runs an adversarial review through an external AI model by default (Antigravity CLI, model `gemini-3.7-flash`) or through the current Codex thread when the standalone `self` argument is present. Auto-detects what to review: **plan** or **code**. The default external backend fixes issues and resubmits until approved, for a maximum of 5 rounds. The self backend is review-only unless the user separately asks for implementation.
 
 ---
 
@@ -17,9 +17,41 @@ Sends current work for adversarial review through an external AI model (Antigrav
 - `/adversarial-review plan` — force plan review
 - `/adversarial-review code` — force code review
 - `/adversarial-review <file-path>` — review a specific file (argument contains `/` or `.`)
+- `$adversarial-review self [plan|code|<target>]` — current Codex reviews the explicit or auto-detected target directly; never run `agy` or a reviewer subagent
 - Override model: `/adversarial-review model:gemini-3.7-flash` (argument with `model:` prefix)
 
 ## Instructions
+
+### Early dispatcher: `self`
+
+Run this dispatcher **before** resolving placeholders, generating IDs, checking
+for `agy`, resolving runner paths, dispatching a subagent, or executing Step 1.
+
+1. Parse the invocation arguments as whitespace-delimited tokens. Match `self`
+   only as a standalone token; a path or free-text argument that merely
+   contains the substring does not activate it.
+2. If no standalone `self` token is present, continue with the external backend
+   at the placeholder note and Steps 1–9 below.
+3. If `self` is present:
+   - If any argument matches `^model:.+$`, stop with:
+     `model:* selects an external reviewer and is incompatible with self mode; remove one of them.`
+   - Remove the `self` control token; preserve all remaining arguments, in
+     order, as `SELF_TARGET`.
+   - Resolve `references/self-review.md` from the skill installation in this
+     priority order: (1) `~/.codex/skills/adversarial-review/references/self-review.md`,
+     (2) the first
+     `~/.codex/plugins/cache/*/*/*/skills/adversarial-review/references/self-review.md`,
+     (3) `references/self-review.md` under the current repository root when
+     developing this skill. If none is readable, abort and tell the user to
+     reinstall or update the skill.
+   - Read the resolved file completely and follow it with `SELF_TARGET` as its
+     input.
+   - Do **not** invoke `agy`, execute `references/runner.md` or
+     `scripts/runner_contract.py`, dispatch any reviewer/delegation subagent,
+     create `/tmp/agy-*` files, or enter the external review loop.
+   - Stop when the self-review workflow finishes. The placeholder note,
+     Steps 1–9, and the external-backend Rules below do not apply to this
+     invocation.
 
 > **Placeholders:** `${REVIEW_ID}`, `${ATTEMPT_ID}`, `${AGY_CONVERSATION_ID}`, `${REPO_ROOT}`, and `${BASE_BRANCH}` in the steps below are template placeholders, NOT shell variables. Substitute literal values directly into each tool call. In particular:
 > - `${REPO_ROOT}` is ALWAYS an absolute path captured at Step 2; never replace it with `$(pwd)`.
@@ -160,6 +192,8 @@ Your evidence-gathering is limited to:
 - reading and searching repository files;
 - tracing code, data, and control flow from those files.
 
+Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "*"` to enumerate a directory.
+
 Do NOT execute any command whose purpose is to verify, build, or run the project.
 This includes builds, compilation, tests, test discovery, coverage, linting,
 formatting, type checks, packaging, dependency installation/resolution, code
@@ -264,6 +298,8 @@ Your evidence-gathering is limited to:
 - the exact read-only `git diff` commands supplied in <task>, when present;
 - reading and searching repository files;
 - tracing code, data, and control flow from those files.
+
+Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "*"` to enumerate a directory.
 
 Do NOT execute any command whose purpose is to verify, build, or run the project.
 This includes builds, compilation, tests, test discovery, coverage, linting,
@@ -602,6 +638,8 @@ Your evidence-gathering is limited to:
 - reading and searching repository files;
 - tracing code, data, and control flow from those files.
 
+Every `find_by_name` call MUST include a non-empty `Pattern`; use `Pattern: "*"` to enumerate a directory.
+
 Do NOT execute any command whose purpose is to verify, build, or run the project.
 This includes builds, compilation, tests, test discovery, coverage, linting,
 formatting, type checks, packaging, dependency installation/resolution, code
@@ -793,6 +831,9 @@ Do NOT delete plan files that existed before the review (only temp files created
 
 ## Rules
 
+- A standalone `self` argument is a terminal early branch. Never fall through
+  from self mode into any external-backend step, even if self review cannot
+  resolve its target or complete safely.
 - Codex **actively fixes** issues based on reviewer feedback — this is NOT just message forwarding.
 - Reviewer findings are shown **verbatim** — do not rephrase or shorten. The Step 5 "YOUR NEXT MESSAGE" instruction is blocking.
 - Auto-detect review mode from context; user arguments take priority.
@@ -806,7 +847,7 @@ Do NOT delete plan files that existed before the review (only temp files created
 - **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
 - **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and both narrow agy-1.1.14 non-`SUCCESS` recovery diagnostics.
 - **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-3.7-flash`).
-- **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
+- **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only and the agy 1.1.17 native-tool contract.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. Every `find_by_name` call must include a non-empty `Pattern` (`"*"` when enumerating a directory). It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
 - **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, `/tmp/agy-original-body-${REVIEW_ID}.md`, `/tmp/agy-resume-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.
 - Cleanup is **conditional on terminal state**: remove temp files on approved/max-reached/not-verified; LEAVE them on abort (diagnostic value). Skip all cleanup in Plan Mode.
