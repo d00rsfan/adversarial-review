@@ -3,7 +3,7 @@
 Codex skill for adversarial AI code and plan review.
 
 By default, one AI writes the code (Codex master) and another tears it apart
-(Antigravity `gemini-3.7-flash`, high effort reviewer). Add `self` when the
+(Antigravity `claude-opus-4-6-thinking`, with model-managed Thinking). Add `self` when the
 current Codex thread should perform the adversarial review itself without
 launching `agy` or a reviewer subagent.
 
@@ -17,7 +17,7 @@ in production, not what might be nice to improve.
 This is a Codex skill. `SKILL.md` dispatches either to the self-review workflow
 in `references/self-review.md`, or to `references/runner.md` plus a
 standard-library Python contract validator for reviews through Antigravity CLI
-(agy) (model `gemini-3.7-flash`, reasoning effort `high`).
+(agy) (model `claude-opus-4-6-thinking`, with model-managed Thinking).
 
 ## Key features
 
@@ -244,7 +244,7 @@ rule and approve each invocation manually.
 /adversarial-review plan                  # force plan review
 /adversarial-review code                  # force code review
 /adversarial-review path/to/f             # review a specific file
-/adversarial-review model:gemini-3.7-flash # specify agy model
+/adversarial-review model:<model-id>        # override the agy model
 $adversarial-review self                   # Codex reviews directly; no agy/subagent
 $adversarial-review self code              # self-review local code changes
 $adversarial-review self <target>          # self-review an explicit target
@@ -282,8 +282,9 @@ not part of a path or sentence. Run
 can fall through to the external Steps 1–9.
 
 **Antigravity execution exits with model error.**
-Ensure `GEMINI_API_KEY` is exported or Antigravity CLI is authenticated.
-The default `gemini-3.7-flash` works with API key auth.
+Ensure Antigravity CLI is authenticated for the selected model/provider.
+The default is `claude-opus-4-6-thinking`; it uses model-managed Thinking, so
+the runner intentionally does not pass `--effort`.
 Override with `/adversarial-review model:<name>`.
 
 **Permission prompts on every action.**

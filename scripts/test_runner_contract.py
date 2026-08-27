@@ -19,6 +19,8 @@ REVIEW = "Summary\n\nFindings\n\nNo findings.\n\nVERDICT: APPROVED\n"
 RUNNER_SPEC = (Path(__file__).resolve().parents[1] / "references" / "runner.md").read_text(
     encoding="utf-8"
 )
+SKILL_SPEC = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+DEFAULT_AGY_MODEL = "claude-opus-4-6-thinking"
 
 
 def prompt(history: str = "") -> str:
@@ -98,6 +100,29 @@ class PromptContractTests(unittest.TestCase):
             "Every `view_file` call MUST contain only `AbsolutePath`; never pass `StartLine`, `EndLine`, or any other line-range argument.",
         ):
             self.assertIn(required, recovery_prompt)
+
+
+class ModelSelectionContractTests(unittest.TestCase):
+    def test_skill_declares_opus_default(self) -> None:
+        self.assertIn(
+            f"- `AGY_MODEL` — default `{DEFAULT_AGY_MODEL}`.",
+            SKILL_SPEC,
+        )
+
+    def test_runner_bootstrap_uses_captured_model_placeholder(self) -> None:
+        bootstrap_start = SKILL_SPEC.index("**Dispatch the runner subagent via Agent tool:**")
+        bootstrap_end = SKILL_SPEC.index("**Do NOT run the Agent tool call in background.**")
+        bootstrap = SKILL_SPEC[bootstrap_start:bootstrap_end]
+        self.assertEqual(bootstrap.count("AGY_MODEL: ${AGY_MODEL}"), 1)
+        self.assertNotIn("AGY_MODEL: gemini-3.7-flash", bootstrap)
+
+    def test_report_templates_use_captured_model_placeholder(self) -> None:
+        self.assertEqual(SKILL_SPEC.count("model: ${AGY_MODEL})"), 4)
+        self.assertNotIn("model: gemini-3.7-flash)", SKILL_SPEC)
+
+    def test_runner_forwards_model_without_effort_override(self) -> None:
+        self.assertEqual(RUNNER_SPEC.count("--model ${AGY_MODEL}"), 3)
+        self.assertNotIn("--effort", RUNNER_SPEC)
 
 
 class RecoveredReadTests(unittest.TestCase):

@@ -18,7 +18,7 @@ Runs an adversarial review through an external AI model by default (Antigravity 
 - `/adversarial-review code` — force code review
 - `/adversarial-review <file-path>` — review a specific file (argument contains `/` or `.`)
 - `$adversarial-review self [plan|code|<target>]` — current Codex reviews the explicit or auto-detected target directly; never run `agy` or a reviewer subagent
-- Override model: `/adversarial-review model:gemini-3.7-flash` (argument with `model:` prefix)
+- Override model: `/adversarial-review model:<model-id>` (argument with `model:` prefix)
 
 ## Instructions
 
@@ -53,7 +53,7 @@ for `agy`, resolving runner paths, dispatching a subagent, or executing Step 1.
      Steps 1–9, and the external-backend Rules below do not apply to this
      invocation.
 
-> **Placeholders:** `${REVIEW_ID}`, `${ATTEMPT_ID}`, `${AGY_CONVERSATION_ID}`, `${REPO_ROOT}`, and `${BASE_BRANCH}` in the steps below are template placeholders, NOT shell variables. Substitute literal values directly into each tool call. In particular:
+> **Placeholders:** `${REVIEW_ID}`, `${ATTEMPT_ID}`, `${AGY_CONVERSATION_ID}`, `${AGY_MODEL}`, `${REPO_ROOT}`, and `${BASE_BRANCH}` in the steps below are template placeholders, NOT shell variables. Substitute literal values directly into each tool call. In particular:
 > - `${REPO_ROOT}` is ALWAYS an absolute path captured at Step 2; never replace it with `$(pwd)`.
 > - `${REVIEW_ID}` is stable for the entire review (used in file paths).
 > - `${ATTEMPT_ID}` is a fresh 6-digit random integer generated **per launch** — a new value for the initial exec, for any retry of that exec, for every resume in Step 7, and for any fresh-exec fallback. The combined marker `${REVIEW_ID}-${ATTEMPT_ID}` is embedded in the prompt (HTML comment) so the filesystem session-id fallback identifies exactly THIS launch's rollout. Do NOT reuse a prior launch's ATTEMPT_ID — that would make multiple rollouts match and reintroduce silent session drift.
@@ -442,7 +442,7 @@ should remain in the body file sent to the runner.
 
 **Capture user overrides for `AGY_MODEL` at Step 1:**
 
-The skill supports overrides like `/adversarial-review model:gemini-3.7-flash`. At Step 1, capture:
+The skill supports overrides like `/adversarial-review model:<model-id>`. At Step 1, capture:
 
 - `AGY_MODEL` — default `claude-opus-4-6-thinking`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
 
@@ -518,7 +518,7 @@ Read your full instruction spec at ${RUNNER_SPEC_PATH} and follow the steps ther
 REVIEW_ID: 1711872000-48217593
 REPO_ROOT: /home/dementev/sources/myproject
 OPERATION: initial
-AGY_MODEL: gemini-3.7-flash
+AGY_MODEL: ${AGY_MODEL}
 RUNNER_CONTRACT_PATH: /home/dementev/.codex/skills/adversarial-review/scripts/runner_contract.py
 PROMPT_BODY_PATH: /tmp/agy-body-1711872000-48217593.md
 ORIGINAL_PROMPT_BODY_PATH: /tmp/agy-original-body-1711872000-48217593.md
@@ -527,8 +527,10 @@ RESULT_PATH: /tmp/agy-runner-result-1711872000-48217593.json
 ```
 
 Substitute the actual resolved `${RUNNER_SPEC_PATH}` and
-`${RUNNER_CONTRACT_PATH}` (both absolute paths) and real values for every other
-placeholder. `RESULT_PATH` always follows the pattern
+`${RUNNER_CONTRACT_PATH}` (both absolute paths), the Step-1 value of
+`${AGY_MODEL}`, and real values for every other placeholder. The dispatched
+YAML line MUST be `AGY_MODEL: <the captured Step-1 value>`; do not copy a model
+identifier from documentation prose or an example. `RESULT_PATH` always follows the pattern
 `/tmp/agy-runner-result-${REVIEW_ID}.json`.
 
 **Do NOT run the Agent tool call in background.** Wait for the subagent to return.
@@ -591,7 +593,7 @@ If any check fails → this is a **launch failure** (model produced no actionabl
 Message format:
 
 ```
-## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: gemini-3.7-flash)
+## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: ${AGY_MODEL})
 
 <verbatim contents of /tmp/agy-review-${REVIEW_ID}.md>
 ```
@@ -758,7 +760,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Approved:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: ${AGY_MODEL})
 
 **Status:** Approved after N round(s)
 
@@ -770,7 +772,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Maximum rounds reached:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: ${AGY_MODEL})
 
 **Status:** Maximum reached (5 rounds) — not fully approved
 
@@ -783,7 +785,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Not verified** (resume failed and the operator chose to conclude, or headless with only medium severity):
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: ${AGY_MODEL})
 
 **Status:** NOT VERIFIED — fixes applied, reviewer did not re-verify
 
@@ -849,7 +851,7 @@ Do NOT delete plan files that existed before the review (only temp files created
 - **Runner is dispatched via Agent tool** with `subagent_type: general-purpose`. Agent tool call is synchronous (not `run_in_background`).
 - **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
 - **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and both narrow agy-1.1.14 non-`SUCCESS` recovery diagnostics.
-- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-3.7-flash`).
+- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches. Its default is `claude-opus-4-6-thinking`; a `model:*` invocation argument replaces that value for the whole review.
 - **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only and the agy 1.1.17 native-tool contract.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. Every `find_by_name` call must include a non-empty `Pattern` (`"*"` when enumerating a directory), and every `view_file` call must contain only `AbsolutePath` without line-range properties. It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
 - **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, `/tmp/agy-original-body-${REVIEW_ID}.md`, `/tmp/agy-resume-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.

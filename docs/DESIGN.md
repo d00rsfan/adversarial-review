@@ -86,7 +86,7 @@ five rounds, or until the reviewer emits `VERDICT: APPROVED`.
 - **Self reviewer (Codex, opt-in).** The same current thread applies the
   adversarial rubric directly. It does not delegate, invoke agy, or apply
   fixes.
-- **Reviewer (Antigravity, `gemini-3.7-flash`, effort high).** External AI process invoked per round. Receives
+- **Reviewer (Antigravity, `claude-opus-4-6-thinking`, model-managed Thinking).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in agy plan mode,
   and emits a structured review with `VERDICT:`. See §9.7 for the
   headless-permissions and sandbox trade-off in agy 1.1.12.
@@ -130,7 +130,7 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(Antigravity CLI with `gemini-3.7-flash`, effort high) reduces shared blind spots. The cost is an external
+(Antigravity CLI with `claude-opus-4-6-thinking` and model-managed Thinking) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage. Self mode is an explicit convenience trade-off:
 it preserves the rubric and review discipline when external execution is
@@ -931,6 +931,36 @@ Each decision below follows the same template:
   large-file narrowing must use search. This remains a model-facing
   compatibility rule and must be re-verified if agy's native schema changes.
 
+### §4.19. Select the external model once and propagate the captured value
+
+- **Decision.** Step 1 captures `AGY_MODEL` exactly once, defaulting to
+  `claude-opus-4-6-thinking` unless the invocation contains a `model:*`
+  override. Every initial, resume, recovery, and fresh-exec dispatch forwards
+  that captured value. Bootstrap and report examples use `${AGY_MODEL}` rather
+  than a literal model ID. The runner passes no `--effort` flag because the
+  default Opus model manages Thinking itself.
+- **Where.** `SKILL.md` owns selection and runner-input construction;
+  `references/runner.md` forwards the selected value unchanged. Static model
+  selection fixtures live in `scripts/test_runner_contract.py`.
+- **Context.** The Opus branch changed the declared default and runner command,
+  but left `AGY_MODEL: gemini-3.7-flash` in the concrete bootstrap example.
+  A literal main orchestrator copied that example, so the runner correctly
+  launched the wrong supplied model without the removed Gemini-era effort
+  flag. The installed symlink resolved to the branch checkout and both paths
+  referenced the same `SKILL.md` inode; installation was not the cause.
+- **Alternatives considered.** Hardcoding Opus in the runner was rejected
+  because it would silently disable the documented `model:*` override. Asking
+  the runner to infer whether main intended a default or override was rejected
+  because the input contains only the already selected model.
+- **Chosen because.** One source of truth preserves overrides while removing
+  the conflicting executable example that caused the incident. Static checks
+  cover selection, propagation, display, and the absence of an effort override
+  without spending reviewer tokens.
+- **Trade-offs accepted.** A caller that explicitly overrides the model is
+  responsible for selecting a model slug compatible with agy's default
+  reasoning behavior; this interface does not expose a separate effort
+  override.
+
 ---
 
 ## §5. Rejected ideas
@@ -1307,6 +1337,30 @@ separate state. Bind paths in the operations themselves, and distinguish a
 completed current turn from a stale/recovered envelope only with positive
 transcript evidence—never from response plausibility alone.
 
+### §6.12. 2026-08-27: Opus default was contradicted by a Gemini bootstrap example
+
+**Report.** A repeated external review failed after both runner attempts. The
+diagnostic said the runner launched `gemini-3.7-flash` without the required
+effort even though the active branch was expected to use Opus.
+
+**Verification.** The installed skill path was a working symlink to this
+checkout, and the installed and checkout `SKILL.md` paths had the same inode.
+The active `opus` branch declared `claude-opus-4-6-thinking` as the default at
+Step 1, but its concrete runner-bootstrap YAML still said
+`AGY_MODEL: gemini-3.7-flash`. The runner command correctly forwarded whatever
+main supplied and intentionally had no `--effort` after the Opus migration.
+
+**Mitigation.** Replaced concrete model IDs in executable/report templates
+with `${AGY_MODEL}`, made substitution from the captured Step-1 value explicit,
+aligned current documentation and examples with the Opus default, and added
+static regression tests for default selection, bootstrap propagation, report
+labels, and effort handling.
+
+**Lesson.** A declared default is not authoritative when a later concrete
+example can be copied as executable input. Runtime examples must reference the
+same captured placeholder, and tests must cover the full selection-to-launch
+path rather than only the final command.
+
 ---
 
 ## §7. Smoke test protocol
@@ -1324,6 +1378,7 @@ the repo root. Expected outputs are in comments.
 REVIEW_ID=$(date +%s)-$(printf '%08d' $RANDOM)
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
 REPO_ROOT=$(git rev-parse --show-toplevel)
+AGY_MODEL=claude-opus-4-6-thinking
 cat > /tmp/agy-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 <role>
@@ -1343,7 +1398,7 @@ EOF
 
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model "${AGY_MODEL}" --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -1401,7 +1456,7 @@ EOF
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation "${CONVERSATION_ID}" \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model "${AGY_MODEL}" --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -1425,7 +1480,7 @@ grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 timeout 60 agy --print "Reply with VERDICT: APPROVED" \
   --conversation 00000000-0000-0000-0000-000000000000 \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model "${AGY_MODEL}" --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 30s \
   > /tmp/agy-bad-resume.stdout \
@@ -1500,9 +1555,11 @@ rg -n 'the ONLY cases where a non-`SUCCESS` JSON status may' references/runner.m
 
 # Executable contract tests cover exit code, canonical containment, required
 # evidence, successful same-filename recovery, transcript errors/mismatch, and
-# quoted contract tags in fresh-exec history.
+# quoted contract tags in fresh-exec history. They also pin the Opus default,
+# captured-model bootstrap propagation, report labels, and no-effort runner
+# command without invoking agy.
 python3 scripts/test_runner_contract.py
-# expect: 22 tests, OK
+# expect: 26 tests, OK
 
 # The self dispatcher must remain terminal and read-only before every
 # external-backend action.
@@ -1551,6 +1608,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-08-20 | not invoked (self backend) | deterministic fixtures + Codex workspace | Codex | Added the terminal standalone `self` dispatcher, read-only local review workflow, and static regression contract. Existing agy transport remained unchanged. |
 | 2026-08-21 | agy 1.1.17 | deterministic fixtures + Gelius CRP code-vs-plan dogfood | Codex + Antigravity | Diagnosed review `1787304800-73194628`: `find_by_name` omitted its newly required `Pattern`, then a corrected call and complete APPROVED response still left the envelope at `ERROR`. Added the prompt-contract rule in §4.17 and its negative fixture. Review `1787309661-80826937` then completed through the ordinary `SUCCESS` path with `VERDICT: APPROVED` and no recovery warning. Resume edge cases were not re-run. |
 | 2026-08-21 | agy 1.1.17 (not re-invoked) | user diagnostic + deterministic fixtures | Codex | An Opus-backed launch reported `additional properties 'StartLine' not allowed` for a native file read while the Gemini-backed master flow worked. Added the `view_file` `AbsolutePath`-only prompt contract (§4.18), a negative fixture, and recovery-prompt coverage for both native-tool rules. Per user request, no reviewer launch or Opus tokens were used to verify the fix. |
+| 2026-08-27 | agy 1.1.22 (help only; reviewer not invoked) | symlink/inode inspection + deterministic fixtures | Codex | Diagnosed the Opus-default regression as a literal Gemini ID left in the runner bootstrap example, not an installation-link failure (§6.12). Added the single-source model propagation contract (§4.19), aligned current docs/examples, and pinned it with four static tests. Per user request, no external review or Opus tokens were used. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1770,7 +1828,7 @@ Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr
 
 ### §12.5 Model choice
 
-The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry once, archive on resume failure, and write result JSON. It performs no severity judgment or review interpretation; the main Codex thread keeps all judgment work. The input field `AGY_MODEL` names the external reviewer model and must not be confused with the model executing the runner subagent.
+The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry once, archive on resume failure, and write result JSON. It performs no severity judgment or review interpretation; the main Codex thread keeps all judgment work. The input field `AGY_MODEL` names the external reviewer model and must not be confused with the model executing the runner subagent. Main captures it once at Step 1 and every later dispatch and user-visible model label reuses that exact value (§4.19); concrete bootstrap examples must never introduce a second model default.
 
 ### §12.6 Invariants preserved
 
