@@ -12,7 +12,7 @@ Orientation for AI coding agents working on this repo.
 
 ## What this is
 
-A Codex skill that orchestrates adversarial review: Codex writes an adversarial prompt, launches Antigravity CLI (agy) (model `gemini-3.7-flash`, reasoning effort High / high) as an external reviewer, shows the findings to the user, applies fixes, and iterates up to 5 rounds until approved. This is **not a regular codebase** — the product is a single instruction file (`SKILL.md`) executed by OpenAI Codex at runtime.
+A Codex skill that orchestrates adversarial review: Codex writes an adversarial prompt, launches Antigravity CLI (agy) (model `gemini-3.8-flash-high`, reasoning effort High / high) as an external reviewer, shows the findings to the user, applies fixes, and iterates up to 5 rounds until approved. This is **not a regular codebase** — the product is a single instruction file (`SKILL.md`) executed by OpenAI Codex at runtime.
 
 ## Where to look
 
@@ -39,7 +39,7 @@ The skill runs in two processes:
 
 **Main orchestrator** (`SKILL.md`, main Codex thread): mode detection, REVIEW_ID, REPO_ROOT capture, review-material prep (Steps 1-3), review display (Step 5), code fixes (Step 6), final summary (Step 8), cleanup (Step 9), and round counting.
 
-**Runner subagent** (`references/runner.md`, dispatched via Agent subagent tool): validates that the prompt contains the required static-review-only policy, builds the launch prompt with per-attempt session marker, invokes Antigravity (`agy` CLI with model `gemini-3.7-flash`, reasoning effort `high`), runs strict checks on the result, captures the conversation id via two-tier lookup (primary single-JSON `conversation_id`, secondary transcript content-match under `~/.gemini/antigravity-cli/brain/`), retries once on infrastructure failure, returns a small JSON summary.
+**Runner subagent** (`references/runner.md`, dispatched via Agent subagent tool): validates that the prompt contains the required static-review-only policy, builds the launch prompt with per-attempt session marker, invokes Antigravity (`agy` CLI with model `gemini-3.8-flash-high`, reasoning effort `high`), runs strict checks on the result, captures the conversation id via two-tier lookup (primary single-JSON `conversation_id`, secondary transcript content-match under `~/.gemini/antigravity-cli/brain/`), retries once on infrastructure failure, returns a small JSON summary.
 
 **Why the split:** Every Antigravity invocation produces a stdout JSON object, a stderr file, and a transcript under `~/.gemini/antigravity-cli/brain/`. Keeping these inside the subagent means the main thread's context never sees them — only the final review markdown (~5K) flows back. This eliminates context residue across review rounds.
 

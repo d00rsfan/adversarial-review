@@ -2,7 +2,7 @@
 
 Codex skill for adversarial AI code and plan review.
 
-One AI writes the code (Codex master). Another tears it apart (Antigravity `gemini-3.7-flash`, high effort reviewer). Iterate until approved.
+One AI writes the code (Codex master). Another tears it apart (Antigravity `gemini-3.8-flash-high`, high effort reviewer). Iterate until approved.
 
 ## What is this
 
@@ -13,7 +13,7 @@ in production, not what might be nice to improve.
 
 This is a Codex skill — a `SKILL.md` file plus a small `references/runner.md` that together
 teach OpenAI Codex how to run adversarial reviews through Antigravity CLI (agy)
-(model `gemini-3.7-flash`, reasoning effort `high`).
+(model `gemini-3.8-flash-high`, reasoning effort `high`).
 
 ## Key features
 
@@ -204,7 +204,7 @@ rule and approve each invocation manually.
 /adversarial-review plan                  # force plan review
 /adversarial-review code                  # force code review
 /adversarial-review path/to/f             # review a specific file
-/adversarial-review model:gemini-3.7-flash # specify agy model
+/adversarial-review model:gemini-3.8-flash-high # specify agy model
 ```
 
 ## Prompt architecture
@@ -230,7 +230,7 @@ See [examples/review-output.md](examples/review-output.md) for a sample review.
 
 **Antigravity execution exits with model error.**
 Ensure `GEMINI_API_KEY` is exported or Antigravity CLI is authenticated.
-The default `gemini-3.7-flash` works with API key auth.
+The default `gemini-3.8-flash-high` works with API key auth.
 Override with `/adversarial-review model:<name>`.
 
 **Permission prompts on every action.**

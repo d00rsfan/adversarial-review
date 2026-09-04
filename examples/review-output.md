@@ -4,7 +4,7 @@ This is a synthetic example showing what a typical adversarial review looks like
 
 ---
 
-## Adversarial Review — Round 1 (mode: code, model: gemini-3.7-flash)
+## Adversarial Review — Round 1 (mode: code, model: gemini-3.8-flash-high)
 
 ## Summary
 
@@ -61,7 +61,7 @@ VERDICT: REVISE
 
 ---
 
-## Adversarial Review — Round 2 (mode: code, model: gemini-3.7-flash)
+## Adversarial Review — Round 2 (mode: code, model: gemini-3.8-flash-high)
 
 ## Summary
 

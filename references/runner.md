@@ -12,7 +12,7 @@ The main thread dispatches you via the Agent tool. The prompt contains a YAML-li
 REVIEW_ID: <string, format "{unix_ts}-{8-digit}">
 REPO_ROOT: <absolute path, validated by main>
 OPERATION: initial | resume | fresh-exec
-AGY_MODEL: <e.g. gemini-3.7-flash>  # the model agy CLI launches
+AGY_MODEL: <e.g. gemini-3.8-flash-high>  # the model agy CLI launches
 PROMPT_BODY_PATH: <absolute path to file containing the review prompt body WITHOUT the session marker; main writes this before dispatch>
 AGY_CONVERSATION_ID: <UUID, required only when OPERATION=resume>
 RESULT_PATH: /tmp/agy-runner-result-<REVIEW_ID>.json  # you write the structured result here

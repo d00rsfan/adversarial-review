@@ -83,7 +83,7 @@ runs up to five rounds, or until the reviewer emits
 
 - **Lead (Codex).** Orchestrator. Reads `SKILL.md`, runs the Bash /
   Write / Read / Edit tools, authors the fixes, decides when to stop.
-- **Reviewer (Antigravity, `gemini-3.7-flash`, effort high).** External AI process invoked per round. Receives
+- **Reviewer (Antigravity, `gemini-3.8-flash-high`, effort high).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in agy plan mode,
   and emits a structured review with `VERDICT:`. See §9.7 for the
   headless-permissions and sandbox trade-off in agy 1.1.12.
@@ -123,7 +123,7 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(Antigravity CLI with `gemini-3.7-flash`, effort high) reduces shared blind spots. The cost is an external
+(Antigravity CLI with `gemini-3.8-flash-high`, effort high) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage.
 
@@ -1132,7 +1132,7 @@ End the LAST line with exactly: VERDICT: APPROVED
 EOF
 
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-3.8-flash-high --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -1185,7 +1185,7 @@ EOF
 
 cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation "${CONVERSATION_ID}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-3.8-flash-high --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 5m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
@@ -1208,7 +1208,7 @@ grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 ```bash
 timeout 60 agy --print "Reply with VERDICT: APPROVED" \
   --conversation 00000000-0000-0000-0000-000000000000 \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-3.8-flash-high --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 30s \
   > /tmp/agy-bad-resume.stdout \
@@ -1298,6 +1298,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-04-17 | Codex CLI 0.121.0 (pre-agy backend) | reference + container sandboxes | initial author + reviewers | Historical contract and the two-tier, attempt-scoped transcript binding were developed here; details retained in §6.6–§6.8. |
 | 2026-08-13 | agy 1.1.12 | Codex workspace | Codex | Reproduced the migrated stdin bug from review `1786638300-60419327`. Verified `--print "$(cat file)"`, JSON extraction, transcript marker binding, stable explicit resume, and exit-0/new-UUID behavior for a missing conversation. Real-diff dogfood also showed headless command auto-denial without `--dangerously-skip-permissions`, two `--sandbox` connection-reset failures, and `SUCCESS` without that unstable flag (§9.7). Updated §2, §6.9, and §7. |
 | 2026-08-18 | agy 1.1.14 | Codex workspace | Codex | Reproduced review `1787048123-58310427` as exit 1 + empty stderr + ERROR JSON + marker-bound interrupted transcript. Verified explicit UUID resume completes the review, later clean turns retain sticky ERROR state, a short ordinary plan-mode prompt succeeds, and `--disable-slash-commands` disables `--mode plan`. Added bounded conversation-preserving recovery (§4.15), JSON-aware diagnostics, and smoke guards. |
+| 2026-09-04 | agy 1.1.23 | `agy models` + static inspection | Codex | Verified that `gemini-3.8-flash-high` is the advertised high-effort Gemini 3.8 Flash model slug and synchronized the default, examples, and smoke-test commands. Transport and resume edge cases were not re-run. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
