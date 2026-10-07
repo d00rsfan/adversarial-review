@@ -14,7 +14,7 @@ Orientation for AI coding agents working on this repo.
 
 A Codex skill with two adversarial-review backends. The default backend writes
 an adversarial prompt, launches Antigravity CLI (agy) (model
-`claude-opus-4-6-thinking`, with model-managed Thinking), shows the findings, applies
+`claude-opus-5-5-high`, with high reasoning effort), shows the findings, applies
 fixes, and iterates up to 5 rounds. The standalone `self` argument instead
 keeps review judgment in the current Codex thread and never launches agy or a
 reviewer subagent. This is **not a regular application** — the runtime product
@@ -60,7 +60,7 @@ terminal early branch before Step 1. It resolves an explicit or auto-detected
 target, performs read-only adversarial inspection, and optionally runs targeted
 checks.
 
-**Runner subagent** (`references/runner.md`, dispatched via Agent subagent tool): validates that the prompt contains the required static-review-only policy and absolute repository context, builds the launch prompt with per-attempt session marker, invokes Antigravity (`agy` CLI with the selected `AGY_MODEL`; default `claude-opus-4-6-thinking`, without an explicit effort flag) with layered workspace binding, runs strict checks on the result, captures the conversation id via two-tier lookup (primary single-JSON `conversation_id`, secondary transcript content-match under `~/.gemini/antigravity-cli/brain/`), and spends one internal retry on any retryable failure. Security-critical prompt validation and the narrow marker-bound missing-file completion predicate are deterministic code in `scripts/runner_contract.py`, with negative fixtures in `scripts/test_runner_contract.py`.
+**Runner subagent** (`references/runner.md`, dispatched via Agent subagent tool): validates that the prompt contains the required static-review-only policy and absolute repository context, builds the launch prompt with per-attempt session marker, invokes Antigravity (`agy` CLI with the selected `AGY_MODEL`; default `claude-opus-5-5-high`, without an explicit effort flag) with layered workspace binding, runs strict checks on the result, captures the conversation id via two-tier lookup (primary single-JSON `conversation_id`, secondary transcript content-match under `~/.gemini/antigravity-cli/brain/`), and spends one internal retry on any retryable failure. Security-critical prompt validation and the narrow marker-bound missing-file completion predicate are deterministic code in `scripts/runner_contract.py`, with negative fixtures in `scripts/test_runner_contract.py`.
 
 **Why the split:** Every Antigravity invocation produces a stdout JSON object, a stderr file, and a transcript under `~/.gemini/antigravity-cli/brain/`. Keeping these inside the subagent means the main thread's context never sees them — only the final review markdown (~5K) flows back. This eliminates context residue across review rounds.
 

@@ -86,7 +86,7 @@ five rounds, or until the reviewer emits `VERDICT: APPROVED`.
 - **Self reviewer (Codex, opt-in).** The same current thread applies the
   adversarial rubric directly. It does not delegate, invoke agy, or apply
   fixes.
-- **Reviewer (Antigravity, `claude-opus-4-6-thinking`, model-managed Thinking).** External AI process invoked per round. Receives
+- **Reviewer (Antigravity, `claude-opus-5-5-high`, high reasoning effort).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in agy plan mode,
   and emits a structured review with `VERDICT:`. See §9.7 for the
   headless-permissions and sandbox trade-off in agy 1.1.12.
@@ -130,7 +130,7 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(Antigravity CLI with `claude-opus-4-6-thinking` and model-managed Thinking) reduces shared blind spots. The cost is an external
+(Antigravity CLI with `claude-opus-5-5-high` and high reasoning effort) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage. Self mode is an explicit convenience trade-off:
 it preserves the rubric and review discipline when external execution is
@@ -138,7 +138,7 @@ undesired or unavailable, but does not claim independent-model diversity.
 
 ---
 
-## §2. Antigravity CLI empirical facts (v1.1.12 through v1.1.17)
+## §2. Antigravity CLI empirical facts (v1.1.12 through v1.3.1)
 
 The transport contract was verified on `agy 1.1.12` on 2026-08-13. The
 interrupted-stream behavior and completed-review/missing-file behavior were
@@ -153,6 +153,12 @@ The prior text in this section was
 mechanically inherited from Codex CLI 0.121.0 during the agy migration;
 those Codex-specific flags and stream semantics were never valid agy facts.
 Re-run `§7` after upgrading agy.
+
+**Model catalog update (agy 1.3.1, 2026-10-07):** the former default
+`claude-opus-4-6-thinking` is superseded. `agy models` lists
+`claude-opus-5-5-low`, `claude-opus-5-5-medium`, and `claude-opus-5-5-high`,
+but no Opus 4.6 ID. The skill now selects `claude-opus-5-5-high`; reasoning
+effort is encoded in that slug, so no separate `--effort` flag is needed.
 
 ### §2.1. Invocation shapes
 
@@ -934,11 +940,11 @@ Each decision below follows the same template:
 ### §4.19. Select the external model once and propagate the captured value
 
 - **Decision.** Step 1 captures `AGY_MODEL` exactly once, defaulting to
-  `claude-opus-4-6-thinking` unless the invocation contains a `model:*`
+  `claude-opus-5-5-high` unless the invocation contains a `model:*`
   override. Every initial, resume, recovery, and fresh-exec dispatch forwards
   that captured value. Bootstrap and report examples use `${AGY_MODEL}` rather
   than a literal model ID. The runner passes no `--effort` flag because the
-  default Opus model manages Thinking itself.
+  default Opus slug already selects high reasoning effort.
 - **Where.** `SKILL.md` owns selection and runner-input construction;
   `references/runner.md` forwards the selected value unchanged. Static model
   selection fixtures live in `scripts/test_runner_contract.py`.
@@ -1040,6 +1046,18 @@ started in the repository, but the first native `run_command` tool call used
 `~/.gemini/antigravity-cli/scratch` and its relative diff failed. The `cd`
 prefix remains useful but is no longer the sole control. §4.3 adds
 `--add-dir`, root-pinned `git -C` commands, and absolute file paths.
+
+### §5.9. Retired Opus default and implicit model replacement
+
+§4.19 originally selected `claude-opus-4-6-thinking` with model-managed
+Thinking. That default was retired from the live agy 1.3.1 catalog. The
+maintained default is now `claude-opus-5-5-high`, with high effort encoded in
+the slug. Selection-once and unchanged propagation still apply.
+
+Do not silently substitute another model after a failed launch. A retry
+cannot restore a retired ID; the operator must update the skill or supply an
+available `model:*` override. Keep the bounded retry and fail-closed approval
+contract unchanged.
 
 ---
 
@@ -1361,6 +1379,28 @@ example can be copied as executable input. Runtime examples must reference the
 same captured placeholder, and tests must cover the full selection-to-launch
 path rather than only the final command.
 
+### §6.13. 2026-10-07: Opus 4.6 was removed from the model catalog
+
+**Report.** Review stopped after the allowed retry because Antigravity no
+longer recognized `claude-opus-4-6-thinking`.
+
+**Verification.** The installed skill remains a symlink to this checkout.
+`agy --version` reports 1.3.1, and `agy models` lists Opus 5.5 low, medium,
+and high IDs without any Opus 4.6 entry. A no-tools probe with the old ID
+exited 1 with `status=ERROR`, an empty conversation ID, zero turns, and zero
+token usage. No Opus 5.5 test inference was run. The user subsequently
+confirmed the updated skill worked in their own review.
+
+**Mitigation.** Updated the default, runner schema example, current docs,
+sample output, smoke setup, and existing model-selection regression fixture
+to `claude-opus-5-5-high`. Kept model overrides, captured-value propagation,
+the no-separate-effort launch shape, and the retry/approval gates intact.
+README troubleshooting now directs operators to `agy models` for current IDs.
+
+**Lesson.** A static regression fixture can prevent inconsistent defaults;
+it cannot prove a provider still serves that model. Check the live catalog
+and launch contract when changing the default.
+
 ---
 
 ## §7. Smoke test protocol
@@ -1378,7 +1418,7 @@ the repo root. Expected outputs are in comments.
 REVIEW_ID=$(date +%s)-$(printf '%08d' $RANDOM)
 ATTEMPT_ID=$(printf '%06d' $((RANDOM * RANDOM % 1000000)))
 REPO_ROOT=$(git rev-parse --show-toplevel)
-AGY_MODEL=claude-opus-4-6-thinking
+AGY_MODEL=claude-opus-5-5-high
 cat > /tmp/agy-prompt-${REVIEW_ID}.md <<EOF
 <!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->
 <role>
@@ -1609,6 +1649,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-08-21 | agy 1.1.17 | deterministic fixtures + Gelius CRP code-vs-plan dogfood | Codex + Antigravity | Diagnosed review `1787304800-73194628`: `find_by_name` omitted its newly required `Pattern`, then a corrected call and complete APPROVED response still left the envelope at `ERROR`. Added the prompt-contract rule in §4.17 and its negative fixture. Review `1787309661-80826937` then completed through the ordinary `SUCCESS` path with `VERDICT: APPROVED` and no recovery warning. Resume edge cases were not re-run. |
 | 2026-08-21 | agy 1.1.17 (not re-invoked) | user diagnostic + deterministic fixtures | Codex | An Opus-backed launch reported `additional properties 'StartLine' not allowed` for a native file read while the Gemini-backed master flow worked. Added the `view_file` `AbsolutePath`-only prompt contract (§4.18), a negative fixture, and recovery-prompt coverage for both native-tool rules. Per user request, no reviewer launch or Opus tokens were used to verify the fix. |
 | 2026-08-27 | agy 1.1.22 (help only; reviewer not invoked) | symlink/inode inspection + deterministic fixtures | Codex | Diagnosed the Opus-default regression as a literal Gemini ID left in the runner bootstrap example, not an installation-link failure (§6.12). Added the single-source model propagation contract (§4.19), aligned current docs/examples, and pinned it with four static tests. Per user request, no external review or Opus tokens were used. |
+| 2026-10-07 | agy 1.3.1 (catalog + rejected old-ID probe) | live model catalog + deterministic fixtures + user review | Codex + user | Confirmed Opus 4.6 is no longer listed and its ID fails before inference with zero token usage (§6.13). Switched the default to the listed `claude-opus-5-5-high`; all 26 runner tests, 5 self-mode tests, and skill validation passed. Per user request, no Opus 5.5 test inference was run; the user subsequently confirmed the updated skill worked in their own review. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.

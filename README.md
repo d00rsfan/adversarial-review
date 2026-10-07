@@ -3,7 +3,7 @@
 Codex skill for adversarial AI code and plan review.
 
 By default, one AI writes the code (Codex master) and another tears it apart
-(Antigravity `claude-opus-4-6-thinking`, with model-managed Thinking). Add `self` when the
+(Antigravity `claude-opus-5-5-high`, with high reasoning effort). Add `self` when the
 current Codex thread should perform the adversarial review itself without
 launching `agy` or a reviewer subagent.
 
@@ -17,7 +17,7 @@ in production, not what might be nice to improve.
 This is a Codex skill. `SKILL.md` dispatches either to the self-review workflow
 in `references/self-review.md`, or to `references/runner.md` plus a
 standard-library Python contract validator for reviews through Antigravity CLI
-(agy) (model `claude-opus-4-6-thinking`, with model-managed Thinking).
+(agy) (model `claude-opus-5-5-high`, with high reasoning effort).
 
 ## Key features
 
@@ -282,10 +282,14 @@ not part of a path or sentence. Run
 can fall through to the external Steps 1–9.
 
 **Antigravity execution exits with model error.**
-Ensure Antigravity CLI is authenticated for the selected model/provider.
-The default is `claude-opus-4-6-thinking`; it uses model-managed Thinking, so
-the runner intentionally does not pass `--effort`.
-Override with `/adversarial-review model:<name>`.
+Run `agy models` to list the model IDs available to your installation.
+The default is `claude-opus-5-5-high` (Opus 5.5 with high reasoning effort);
+the effort is encoded in the ID, so the runner does not pass `--effort`.
+Antigravity 1.3.1 no longer lists the former `claude-opus-4-6-thinking` ID.
+Update the skill or explicitly select an available ID with
+`/adversarial-review model:<model-id>`. If the selected ID is listed but still
+fails, check authentication and provider access. An unavailable model remains
+a failed review; the skill does not silently switch models or grant approval.
 
 **Permission prompts on every action.**
 Add the permissions from the [setup section](#3-add-permissions). Check that

@@ -20,7 +20,7 @@ RUNNER_SPEC = (Path(__file__).resolve().parents[1] / "references" / "runner.md")
     encoding="utf-8"
 )
 SKILL_SPEC = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
-DEFAULT_AGY_MODEL = "claude-opus-4-6-thinking"
+DEFAULT_AGY_MODEL = "claude-opus-5-5-high"
 
 
 def prompt(history: str = "") -> str:

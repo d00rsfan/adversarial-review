@@ -1,13 +1,13 @@
 ---
 name: adversarial-review
-description: Adversarial code/plan review with two backends. By default Antigravity (model claude-opus-4-6-thinking, model-managed Thinking) reviews and Codex fixes iteratively; add the standalone self argument for a Codex-only review that never launches agy or a reviewer subagent. Auto-detects plan/code/code-vs-plan mode.
+description: Adversarial code/plan review with two backends. By default Antigravity (model claude-opus-5-5-high, high reasoning effort) reviews and Codex fixes iteratively; add the standalone self argument for a Codex-only review that never launches agy or a reviewer subagent. Auto-detects plan/code/code-vs-plan mode.
 ---
 
 # Adversarial Code Review
 
 > **Platform:** Codex CLI only. The default backend orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. The `self` backend keeps the entire review in the current Codex thread and never launches Antigravity or a reviewer subagent. Running the default backend from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
 
-Runs an adversarial review through an external AI model by default (Antigravity CLI, model `claude-opus-4-6-thinking`) or through the current Codex thread when the standalone `self` argument is present. Auto-detects what to review: **plan** or **code**. The default external backend fixes issues and resubmits until approved, for a maximum of 5 rounds. The self backend is review-only unless the user separately asks for implementation.
+Runs an adversarial review through an external AI model by default (Antigravity CLI, model `claude-opus-5-5-high`) or through the current Codex thread when the standalone `self` argument is present. Auto-detects what to review: **plan** or **code**. The default external backend fixes issues and resubmits until approved, for a maximum of 5 rounds. The self backend is review-only unless the user separately asks for implementation.
 
 ---
 
@@ -444,7 +444,7 @@ should remain in the body file sent to the runner.
 
 The skill supports overrides like `/adversarial-review model:<model-id>`. At Step 1, capture:
 
-- `AGY_MODEL` — default `claude-opus-4-6-thinking`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
+- `AGY_MODEL` — default `claude-opus-5-5-high`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
 
 These are passed into the runner YAML input block below.
 
@@ -851,7 +851,7 @@ Do NOT delete plan files that existed before the review (only temp files created
 - **Runner is dispatched via Agent tool** with `subagent_type: general-purpose`. Agent tool call is synchronous (not `run_in_background`).
 - **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
 - **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and both narrow agy-1.1.14 non-`SUCCESS` recovery diagnostics.
-- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches. Its default is `claude-opus-4-6-thinking`; a `model:*` invocation argument replaces that value for the whole review.
+- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches. Its default is `claude-opus-5-5-high`; a `model:*` invocation argument replaces that value for the whole review.
 - **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only and the agy 1.1.17 native-tool contract.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. Every `find_by_name` call must include a non-empty `Pattern` (`"*"` when enumerating a directory), and every `view_file` call must contain only `AbsolutePath` without line-range properties. It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
 - **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, `/tmp/agy-original-body-${REVIEW_ID}.md`, `/tmp/agy-resume-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.
