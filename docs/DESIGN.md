@@ -1857,7 +1857,11 @@ The runner uses a two-channel protocol: the authoritative structured result is w
 
 ### §12.3 Retry budget — single owner
 
-Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation. §4.16 may accept a completed response without spending the retry, but only after its marker-bound transcript guard and with a warning; if that guard fails, the ordinary retry path applies. Every other failure repeats the original launch shape. Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
+Previously, retry was described as covering ALL failure types. The authorization
+diagnosis in §12.8 narrows this: retry lives in the runner alone for eligible
+execution failures (launch_failure, timeout, stderr-infrastructure-error).
+An explicit host approval denial returns `approval_denied` immediately and
+does not enter retry or fresh-exec fallback. Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation. §4.16 may accept a completed response without spending the retry, but only after its marker-bound transcript guard and with a warning; if that guard fails, the ordinary retry path applies. Every other eligible execution failure repeats the original launch shape. Main stops on an initial Step-4 failure. On Step 7, only exhausted `launch_failure` or `timeout` results can enter the existing fresh-exec fallback; `approval_denied`, `infra_error`, and `input_error` abort without fallback.
 
 **The full invariant:** *exactly 2 agy invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
 
@@ -1891,6 +1895,42 @@ The attempt-scoped `ADVERSARIAL-REVIEW-SESSION` marker (round-7 finding) and pos
 3. If Plan Mode propagates, does the subagent's Write (for the repeat-Write mtime bump) fail, prompt, or succeed silently?
 
 **After Task 7 Step 4 runs, REWRITE this subsection with the observed answers.** Delete the hypothesis framing and state the observed behavior as fact. Until then, anyone reading §12.7 should understand it is speculative.
+
+### §12.8 Authorization context across runner dispatches (2026-10-07)
+
+Two Gelius review runs used the same repository, `claude-opus-5-5-high`, agy
+flags, Codex CLI 0.160.1, and workspace-write/network-restricted host policy.
+The successful run `1791384136-70482319` inherited the parent conversation; its
+approval reviewer cited the user's request to retry the external review and
+allowed the escalation. The later run `1791388598-66988228` was spawned with
+`fork_turns: "none"`. Its approval reviewer received a host notice that some
+root user instructions were unavailable, assessed authorization as weaker,
+and denied possible source transmission to an external service. Before that
+denial, the later runner had also tried a sandbox launch that failed to write
+logs/open a localhost listener; the successful runner escalated immediately.
+
+These records make context loss the strongest supported explanation for the
+different decisions; they do not prove a deterministic approval rule. The fix
+preserves conversation history at every dispatch, or verbatim relevant user
+evidence when the host cannot inherit it. Diagnostic output still remains
+isolated in the runner. Existing approvals and a skill's own instructions must
+not be recast as broader consent.
+
+Host approval denial is now distinct from agy execution failure. The runner
+returns `approval_denied` without a verdict, retry, or fallback, and main
+reports the action and rationale. Improving context for future launches must
+not become a way to re-run an already denied action without new authorization.
+The host's approval policy, sandbox, and external model configuration are
+unchanged. See [Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review)
+for the compact-transcript approval model and denial boundary.
+
+Validation: 26 runner-contract and 5 self-mode tests passed before and after
+the change; the skill validator and whitespace checks also passed.
+An independent instruction walkthrough covered inherited authorization,
+missing evidence, sandbox startup failure, and initial/resume approval denial.
+It identified ambiguous missing-context and fallback wording, now made explicit.
+Live external execution is not part of this diagnostic repair: the prior
+denial is preserved and must not be bypassed to test the change.
 
 ---
 

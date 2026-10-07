@@ -30,7 +30,7 @@ To avoid fragility of JSON-in-final-message, you return results via TWO channels
 
 ```json
 {
-  "result": "success" | "launch_failure" | "timeout" | "infra_error" | "input_error",
+  "result": "success" | "approval_denied" | "launch_failure" | "timeout" | "infra_error" | "input_error",
   "verdict": "APPROVED" | "REVISE" | null,
   "review_file": "/tmp/agy-review-<REVIEW_ID>.md" | null,
   "agy_conversation_id": "<uuid>" | null,
@@ -58,6 +58,7 @@ Rules:
 - `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
 - `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
 - `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
+- `result=approval_denied` ⇒ the host explicitly rejected an approval request. Stop immediately, even on the first attempt; no infrastructure retry is required. Set `verdict`, `review_file`, and `agy_conversation_id` to null. Keep all nine fields and preserve the rejected action and host rationale in `errors`; do not infer that the denied command executed or reuse an older review artifact.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume or a marker-bound non-`SUCCESS` recovery).
 - Do NOT return the review text in the JSON. Main reads `review_file` directly.
@@ -149,6 +150,32 @@ On systems with coarse mtime granularity (1s), two successive Writes within the 
 Alternatively and equivalently safe: skip the mtime bump entirely and rely on ATTEMPT_ID rotation alone — the positive content-match in Step R4.4 binds on the marker, not solely on `-newer`. If the retry's new ATTEMPT_ID is embedded in the prompt's first line (which it is), no prior rollout can false-match. The `-newer` condition is a second guard, not a primary one. If the repeat-Write approach fails in practice, drop it and rely on content-match + multi-match-aborts.
 
 ### Step R3: Launch agy
+
+**Host permissions and authorization.** Use the inherited user instructions
+or the main thread's verbatim authorization handoff when explaining this
+specific action to the host approval tool. Name the repository, selected
+model, and the configured Antigravity service. Be explicit that the service
+receives the review prompt and relevant source read by the reviewer; do not
+describe this as local-only merely because project inspection is read-only.
+Mention required runtime writes and the local listener when relevant. Do not
+claim authorization that the supplied user evidence does not establish.
+
+If neither inherited user instructions nor a verbatim handoff identifies the
+requested review and its scope, return `input_error` before launch and explain
+the missing context. Missing evidence is not itself `approval_denied`; reserve
+that result for an actual host rejection.
+
+Use the host's normal permission mechanism for required access. A sandbox
+startup error (for example, a denied log-directory write or localhost bind)
+may use the existing R5 retry to request the necessary permission, if host
+policy permits. Do not repeat an unchanged sandbox launch that cannot work.
+
+An explicit approval rejection is different: return `approval_denied`
+immediately, before R4/R5, preserving the host's rejection rationale. Do not
+retry via another tool, wrapper, agent, execution context, or relaxed policy.
+This applies to initial, resume, fresh-exec, and interrupted-stream recovery
+launches. A new user authorization or supported approval override must be
+handled by main, not inferred by this runner.
 
 **Synchronous launch only.** Always invoke the Bash tool with `run_in_background: false` (the default). Never set `run_in_background: true` for this call — if agy runs in background, you will proceed to Step R4 before stdout/stderr/review files are populated, and the stderr-missing check will incorrectly route to `infra_error`.
 
@@ -426,9 +453,13 @@ never write a descriptive placeholder.
 
 (The two `success` JSON shapes are inlined above per branch. Every success path through R4.4 MUST emit a complete 9-field JSON object — never rely on implicit defaults, never leave a field omitted, never write a literal placeholder like `"<uuid>"` in the output.)
 
-### Step R5: Retry once on any failure (TERMINAL — main will not re-dispatch)
+### Step R5: Retry once on an eligible execution failure (TERMINAL — main will not re-dispatch)
 
 You have at most ONE retry per dispatch. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
+
+An explicit host approval denial never enters this step: return
+`approval_denied` under R3 instead. A denial during the permitted retry also
+returns immediately, without another attempt or fallback.
 
 On retry, first generate a NEW `ATTEMPT_ID` (the old one stays in the old
 rollout; we must not let the grep match it again). Then choose exactly one
@@ -465,7 +496,9 @@ the review, and run R4.0–R4.4 with the recovery-specific guards above.
 
 **B. Every other retryable failure, including a read-only missing-file
 candidate that failed its completed-turn guard.** Rewrite the operation's original prompt
-file with the new marker and re-launch with the same Step R3 command as before.
+file with the new marker and re-launch with the applicable Step R3 command.
+For a sandbox startup failure, use R3's normal host permission mechanism
+within this same retry budget; do not repeat the unchanged sandbox invocation.
 Preserve the response-contract suffix from Step R2.
 
 If the failure was reviewer format drift (REVISE without a matching

@@ -291,6 +291,21 @@ Update the skill or explicitly select an available ID with
 fails, check authentication and provider access. An unavailable model remains
 a failed review; the skill does not silently switch models or grant approval.
 
+**An earlier external review succeeded, but a later one is approval-denied.**
+Check the runner handoff first. The runner must inherit the relevant user
+request and authorization (`fork_turns: "all"` where supported). An empty-history
+runner can leave the approval reviewer without earlier user instructions,
+even when the repository, model, and command are unchanged. The skill preserves
+that context and describes both external source processing and local runtime
+needs in the approval request; it does not grant new permissions.
+
+A sandbox log/listener error may be retryable through the normal approval
+mechanism. An explicit approval rejection instead returns `approval_denied`,
+with no external review verdict or automatic retry. Report the exact reason
+and obtain any missing user authorization; do not disable the sandbox,
+change approval policy, or relaunch through another agent to avoid the denial.
+See [Codex Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review).
+
 **Permission prompts on every action.**
 Add the permissions from the [setup section](#3-add-permissions). Check that
 the file is valid JSON and in the right location (`~/.codex/settings.json`).
