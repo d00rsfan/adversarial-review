@@ -1918,7 +1918,19 @@ not be recast as broader consent.
 
 Host approval denial is now distinct from agy execution failure. The runner
 returns `approval_denied` without a verdict, retry, or fallback, and main
-reports the action and rationale. Improving context for future launches must
+reports the action and rationale in an explicit approval-denied terminal
+report. If fixes were already applied, it also repeats the last findings,
+applied fixes, and NOT VERIFIED/manual-review warning. Main never substitutes
+its own or self-mode judgment for an external verdict. Fresh-exec uses the
+same result dispatch table as initial execution, and Step 5 reads only the
+current successful result's `review_file`, never a fixed or stale path. A
+malformed success aborts without adding a retry outside the runner budget.
+
+Only a later explicit user authorization and request for another review can
+start a new invocation at Step 1, with a fresh review ID and round counter,
+prior findings/fixes in its material, and preserved old diagnostics. This is
+not an automatic retry or resume of the denied invocation; normal host checks
+still apply. Improving context for future launches must
 not become a way to re-run an already denied action without new authorization.
 The host's approval policy, sandbox, and external model configuration are
 unchanged. See [Auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review)
@@ -1929,8 +1941,15 @@ the change; the skill validator and whitespace checks also passed.
 An independent instruction walkthrough covered inherited authorization,
 missing evidence, sandbox startup failure, and initial/resume approval denial.
 It identified ambiguous missing-context and fallback wording, now made explicit.
-Live external execution is not part of this diagnostic repair: the prior
-denial is preserved and must not be bypassed to test the change.
+After the user explicitly authorized external processing of this repository,
+a live static Antigravity review passed host approval. Its first round found
+missing terminal-report and fresh-exec dispatch rules; those paths were
+clarified as described above. The prior Gelius denial remains preserved;
+this separately authorized review does not bypass it. Follow-up external
+verification could not complete: resume returned interrupted-stream ERROR
+envelopes, and fresh-exec exhausted its retry on RESOURCE_EXHAUSTED (429).
+The final fixes passed all 31 local tests and the skill validator, but have
+no final external approval. Failed-run diagnostics were retained.
 
 ---
 

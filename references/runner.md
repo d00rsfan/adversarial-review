@@ -174,8 +174,10 @@ An explicit approval rejection is different: return `approval_denied`
 immediately, before R4/R5, preserving the host's rejection rationale. Do not
 retry via another tool, wrapper, agent, execution context, or relaxed policy.
 This applies to initial, resume, fresh-exec, and interrupted-stream recovery
-launches. A new user authorization or supported approval override must be
-handled by main, not inferred by this runner.
+launches. This runner dispatch and review invocation end on denial. Only a
+later explicit user authorization and request for another review may let main
+start a new invocation under SKILL.md Step 8; this runner must not infer it
+or resume the denied invocation.
 
 **Synchronous launch only.** Always invoke the Bash tool with `run_in_background: false` (the default). Never set `run_in_background: true` for this call — if agy runs in background, you will proceed to Step R4 before stdout/stderr/review files are populated, and the stderr-missing check will incorrectly route to `infra_error`.
 

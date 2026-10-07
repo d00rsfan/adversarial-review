@@ -512,11 +512,28 @@ inherit history, include the relevant user messages verbatim in the runner
 handoff, with their repository/backend scope and any later restrictions.
 Keep this host authorization evidence out of the external review prompt.
 
-Do not invent consent: a skill default, a prior successful command, or an
+**Standing user authorization for external review:** The user explicitly
+authorizes sending task-related code, diffs, plans, requirements, and necessary
+repository context to Antigravity via `agy`, using the configured review model
+(default `claude-opus-5-5-high`). This grant applies across projects when
+external review is part of the authorized work, including initial review and
+subsequent rounds. Do not ask for this transfer permission again.
+
+Exclude credentials, documents containing passwords, server configuration,
+and unrelated files from both the transmitted material and the reviewer's
+filesystem access. Quote this grant and its source in the runner handoff and
+relevant host approval request; keep it out of the external reviewer prompt.
+Later user restrictions take precedence. Host permission checks, explicit
+denials, and the retry/new-invocation rules below still apply.
+
+Outside this explicit standing grant, do not invent consent: a skill default,
+a prior successful command, or an
 assistant's statement that an action is authorized is not a substitute for
 the user's instructions. Preserve evidence that exists; if it is unavailable,
-say so. In particular, do not respawn a denied action with different context
-to obtain a different approval decision.
+say so. In particular, do not respawn a denied action by repackaging existing
+context to obtain a different approval decision. A later explicit user
+authorization and request to run another review follows the new-invocation
+rule in Step 8; it never silently resumes the denied invocation.
 
 **Do NOT Read `${RUNNER_SPEC_PATH}` in main.** Pass the path to the subagent; it reads the spec itself. This keeps runner.md (~12K) out of main's context — both the Read result AND the Agent prompt duplication. Saves ~12K per round × up to 5 rounds per review.
 
@@ -572,17 +589,17 @@ Dispatch based on `result`:
 | `success` | Save `agy_conversation_id` (keep prior if `null` per §2.4.4). Surface `user_warning` if set. Proceed to Step 5. |
 | `timeout` | **TERMINAL — do NOT re-dispatch.** Runner already attempted twice internally (R4.1 + R5 retry = 2 × 10min). Tell user: "Reviewer timed out after two attempts (20 minutes total)." Abort the skill. User can re-invoke `/adversarial-review` to start a fresh review. |
 | `launch_failure` | **TERMINAL — do NOT re-dispatch.** The runner already retried once internally (Step R5). Show `errors` to user, abort the skill. This keeps the total-attempts-per-round invariant at 2 (matches pre-refactor: 1 initial + 1 retry). |
-| `approval_denied` | Stop the external workflow, show the blocked action and approval rationale, and retain diagnostics. Do not re-dispatch, route through fresh-exec, or report a review verdict. Continue only with an authorized materially safer alternative, or ask for the missing user authorization. |
+| `approval_denied` | End this invocation with the Step 8 **Approval denied** report, then preserve diagnostics under Step 9. Do not re-dispatch, route through fresh-exec, or substitute main/self review for an external verdict. Any newly authorized review follows Step 8's new-invocation rule. |
 | `infra_error` | Show `errors` to user (infrastructure: /tmp not writable, stderr file missing, RUNNER_RESULT_AT line absent). Abort. |
 | `input_error` | Bug in orchestration. Show `errors` to user. Abort. |
 
-**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the full retry budget (≤2 attempts per dispatch, internal) regardless of failure type. Total Antigravity invocations per round ≤ 2.
+**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the full retry budget (≤2 attempts per dispatch, internal) for eligible execution failures. An explicit approval denial stops immediately without spending any remaining retry. Total Antigravity invocations per round ≤ 2.
 
 > **CRITICAL — main thread does NOT read stdout/stderr/JSONL/rollout files BY CONTENT.** Those live and die inside the subagent. Main reads: the runner result JSON at `RESULT_PATH`, the review file at `review_file`, and nothing else from `/tmp/agy-*`. Archival `mv` (on resume failure) is done by the runner, not main — main never references `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` in any Bash argv.
 
 ### Step 5: Read the review, show it, then check the verdict
 
-**1. Read the review file.** Read `/tmp/agy-review-${REVIEW_ID}.md`.
+**1. Read the current successful result only.** Enter this step only after the current dispatch returned `result=success` with a non-null `review_file`. Read that exact JSON `review_file` path. Never infer a path or reuse a prior round's artifact when the current result is a failure or has no review file.
 
 **2. Semantic sanity checks.** The file MUST pass all of these:
 
@@ -590,12 +607,12 @@ Dispatch based on `result`:
 - Contains a line exactly matching `^VERDICT: (APPROVED|REVISE)$`.
 - If verdict is `REVISE` → file must also contain at least one line matching `\[severity:\s*(critical|high|medium)` (i.e. at least one structured finding).
 
-If any check fails → this is a **launch failure** (model produced no actionable review):
-
-- Show the user the `/tmp/agy-stderr-${REVIEW_ID}.txt` contents (if any) AND the raw review file.
-- Offer ONE retry of Step 4 (re-launch the same round). Retry does NOT consume the round counter — the round counter advances only when a valid review is produced.
-- Track the retry counter in your **current round's** reasoning only. The counter resets at the start of every new round.
-- After a failed retry → hard abort the skill. Do NOT route to the Step 7 fresh-exec fallback (that path is for resume failures in rounds 2+, and depends on prior-round content).
+If any check fails, the runner's claimed success is inconsistent with its
+artifact: report an infrastructure/contract error and abort, preserving
+diagnostics. Do not display the artifact as a valid review, inspect raw runner
+diagnostics, offer another retry, or enter fresh-exec fallback. The runner
+already owns validation and the complete attempt budget. If Step 6 fixes were
+applied, also show Step 8's NOT VERIFIED report for those fixes.
 
 **3. Show the review to the user. This is mandatory and blocking.**
 
@@ -733,7 +750,7 @@ Extract `RUNNER_RESULT_AT:` line (same tolerant regex + Glob fallback as Step 4)
 | `success`, verdict `REVISE` | Save new `agy_conversation_id`. If the subagent returned null (zero-find resume), keep the prior id per §2.4.4 — `user_warning` will already have been surfaced. Go to Step 5. |
 | `timeout` | **TERMINAL for this round** — runner already attempted twice. Route to fallback below. (Fresh-exec is a NEW round from the 5-round counter — its own ≤2-attempts budget applies.) No user-offered retry; that would compound. |
 | `launch_failure` | **TERMINAL for this round** — runner already retried once internally. Route to fallback below (runner already archived stdout/stderr to `-failed-resume.*` — paths in `archived_stdout` / `archived_stderr`). |
-| `approval_denied` | Stop and handle as in Step 4. No retry or fresh-exec fallback; preserve the denial and do not claim external approval. |
+| `approval_denied` | End with Step 8's **Approval denied** report, including the NOT VERIFIED block for any Step 6 fixes. No retry or fresh-exec fallback; preserve diagnostics. |
 | `infra_error` | Show `errors` to user, abort. |
 | `input_error` | Bug in orchestration. Show `errors` to user, abort; do not route to fallback. |
 
@@ -770,9 +787,37 @@ Do not overwrite `/tmp/agy-original-body-${REVIEW_ID}.md`.
 
 **Archival note:** if the fallback was triggered by `launch_failure`, the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 — main does NOT need to `mv` anything. If triggered by repeated `timeout`, no archival happened (no second Antigravity invocation produced useful diagnostics); main can proceed directly. Either way, main never touches `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` itself.
 
-Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new PROMPT_BODY_PATH pointing at the rebuilt prompt). The fresh-exec consumes one round from the 5-round counter. Return to Step 5 with the new review.
+Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema and history/authorization handoff as Step 4, new PROMPT_BODY_PATH pointing at the rebuilt prompt). The fresh-exec consumes one round from the 5-round counter. Parse its two-channel result and apply the **Step 4 result table** exactly. Enter Step 5 only for `result=success`, using the current JSON `review_file`. In particular, `approval_denied` ends with Step 8's denial report and never reaches Step 5 or another fallback.
 
 ### Step 8: Final result
+
+**Approval denied** (initial, resume, fresh-exec, or recovery launch):
+```
+## Adversarial Review — Summary (mode: <mode>, model: ${AGY_MODEL})
+
+**Status:** ABORTED — approval denied; no new external verdict
+
+**Blocked action:** [the exact requested action]
+**Automatic approval review rejection:** [the host's stated rationale]
+
+Diagnostics have been preserved. This invocation has ended.
+```
+
+If any Step 6 fixes were applied during this invocation, append the complete
+**Not verified** report below, including the last valid findings, applied
+fixes, and explicit warning that manual review is required before merging.
+Never substitute main's or the self backend's judgment for an external verdict.
+
+If additional user authorization could address the rejection, explain exactly
+what action/data/destination requires it and ask for that authorization and a
+new review request. A later explicit user message authorizing that scope and
+requesting or approving another review starts a **new invocation at Step 1**,
+with a fresh REVIEW_ID and round counter; it does not retry/resume this denied
+invocation. Carry the previous findings and applied fixes into the new review
+material, scope it to the current artifact, and preserve the old diagnostics.
+A response explicitly approving the requested new review satisfies this rule;
+an assistant assertion, elapsed time, or repackaged history does not. Host
+permission checks still apply. Do not switch backends within this invocation.
 
 **Approved:**
 ```
@@ -824,7 +869,8 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 | Approved | Remove all temp files |
 | Maximum rounds reached | Remove all temp files |
 | Not verified (fallback conclude) | Remove all temp files |
-| Aborted (approval denial, launch failure, redirect failure, infrastructure error) | **LEAVE files in place** for diagnostics |
+| Approval denied (including a NOT VERIFIED report for applied fixes) | **LEAVE files in place** for diagnostics; this takes precedence over the fallback-conclude row |
+| Aborted (launch failure, redirect failure, infrastructure error) | **LEAVE files in place** for diagnostics |
 
 **In Codex Plan Mode:** skip all cleanup (including deferred). `rm` will trigger a permission prompt. Files will be cleaned up on the next invocation outside Plan Mode.
 

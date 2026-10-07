@@ -117,7 +117,7 @@ class ModelSelectionContractTests(unittest.TestCase):
         self.assertNotIn("AGY_MODEL: gemini-3.7-flash", bootstrap)
 
     def test_report_templates_use_captured_model_placeholder(self) -> None:
-        self.assertEqual(SKILL_SPEC.count("model: ${AGY_MODEL})"), 4)
+        self.assertEqual(SKILL_SPEC.count("model: ${AGY_MODEL})"), 5)
         self.assertNotIn("model: gemini-3.7-flash)", SKILL_SPEC)
 
     def test_runner_forwards_model_without_effort_override(self) -> None:
