@@ -3,7 +3,7 @@
 Codex skill for adversarial AI code and plan review.
 
 By default, one AI writes the code (Codex master) and another tears it apart
-(Antigravity `gemini-3.7-flash`, high effort reviewer). Add `self` when the
+(Antigravity `gemini-4-argon-high`, high effort reviewer). Add `self` when the
 current Codex thread should perform the adversarial review itself without
 launching `agy` or a reviewer subagent.
 
@@ -17,7 +17,7 @@ in production, not what might be nice to improve.
 This is a Codex skill. `SKILL.md` dispatches either to the self-review workflow
 in `references/self-review.md`, or to `references/runner.md` plus a
 standard-library Python contract validator for reviews through Antigravity CLI
-(agy) (model `gemini-3.7-flash`, reasoning effort `high`).
+(agy) (model `gemini-4-argon-high`, reasoning effort `high`).
 
 ## Key features
 
@@ -135,7 +135,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 "Bash(git symbolic-ref*)",
 "Bash(git rev-parse*)",
 // Antigravity: initial/fresh/resume/recovery launch (prompt is one --print argument)
-"Bash(cd * && timeout 600 agy --print *)",
+"Bash(cd * && timeout 1800 agy --print *)",
 // Prompt-file reads performed by the quoted command substitutions
 "Bash(cat /tmp/agy-prompt-*)",
 "Bash(cat /tmp/agy-resume-prompt-*)",
@@ -186,7 +186,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
       "Bash(git status*)",
       "Bash(git symbolic-ref*)",
       "Bash(git rev-parse*)",
-      "Bash(cd * && timeout 600 agy --print *)",
+      "Bash(cd * && timeout 1800 agy --print *)",
       "Bash(cat /tmp/agy-prompt-*)",
       "Bash(cat /tmp/agy-resume-prompt-*)",
       "Bash(cat /tmp/agy-recovery-prompt-*)",
@@ -221,7 +221,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 </details>
 
 **Security note:** The `agy` rule allows any `agy` invocation wrapped in
-`timeout 600`. The skill passes `--mode plan`, and every initial, fresh, and
+`timeout 1800`. The skill passes `--mode plan`, and every initial, fresh, and
 resume prompt explicitly prohibits file changes and project verification.
 Antigravity may use only the supplied read-only `git diff` commands plus file
 read/search operations; it must not run builds, compilation, tests, lint,
@@ -244,7 +244,7 @@ rule and approve each invocation manually.
 /adversarial-review plan                  # force plan review
 /adversarial-review code                  # force code review
 /adversarial-review path/to/f             # review a specific file
-/adversarial-review model:gemini-3.7-flash # specify agy model
+/adversarial-review model:gemini-4-argon-high # specify agy model
 $adversarial-review self                   # Codex reviews directly; no agy/subagent
 $adversarial-review self code              # self-review local code changes
 $adversarial-review self <target>          # self-review an explicit target
@@ -283,7 +283,7 @@ can fall through to the external Steps 1–9.
 
 **Antigravity execution exits with model error.**
 Ensure `GEMINI_API_KEY` is exported or Antigravity CLI is authenticated.
-The default `gemini-3.7-flash` works with API key auth.
+Run `agy models` to confirm `gemini-4-argon-high` is available with your authentication.
 Override with `/adversarial-review model:<name>`.
 
 **Permission prompts on every action.**
@@ -291,10 +291,12 @@ Add the permissions from the [setup section](#3-add-permissions). Check that
 the file is valid JSON and in the right location (`~/.codex/settings.json`).
 
 **Antigravity hangs / timeout (exit code 124).**
-All reviewer calls use `--print-timeout 10m` and are also wrapped in
-`timeout 600`. If you see exit code 124, the reviewer did not respond in time.
-Retry — this is usually
-transient.
+All reviewer calls use `--print-timeout 30m` and are also wrapped in
+`timeout 1800`, giving each attempt 30 minutes. An outer timeout (exit 124)
+or an explicit internal CLI timeout stops the review immediately, preserving
+diagnostics. Neither the runner nor the orchestrator retries, resumes, or
+starts a fresh review automatically after timeout. Start another review only
+with a new explicit user instruction.
 
 **Antigravity reports `The stream was interrupted`.**
 On agy 1.1.14 a failed headless turn can return `status: ERROR`, an empty

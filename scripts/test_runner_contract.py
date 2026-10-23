@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -35,6 +36,30 @@ Review the supplied diff.{suffix}
 
 
 class PromptContractTests(unittest.TestCase):
+    def _code_template(self) -> str:
+        skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        template = skill.split("**Prompt body for code review (≤ 50 files):**", 1)[1].split("```", 2)[1]
+        return template.replace("<repo-root>", ROOT).replace("<review-id>", REVIEW_ID)
+
+    def test_standalone_task_replacement_preserves_trusted_policy(self) -> None:
+        body = self._code_template()
+        boundary = f"<!-- ADVERSARIAL-REVIEW-CONTRACT: {REVIEW_ID} -->"
+        original_prefix = body.split(boundary, 1)[0]
+        task_block = "<task>\nReview these changes; keep literal \\1 and inline <task>.\n</task>"
+        pattern = re.compile(r"^<task>[ \t]*\r?\n.*?^</task>[ \t]*$", re.MULTILINE | re.DOTALL)
+        replaced, count = pattern.subn(lambda _: task_block, body)
+        self.assertEqual(count, 1)
+        self.assertEqual(replaced.split(boundary, 1)[0], original_prefix)
+        self.assertIn(task_block, replaced)
+        valid, reason = validate_prompt(replaced, ROOT, "initial", REVIEW_ID)
+        self.assertTrue(valid, reason)
+
+    def test_unanchored_task_replacement_is_rejected_before_launch(self) -> None:
+        broken = re.sub(r"<task>.*?</task>", "<task>Review changes.</task>", self._code_template(), flags=re.DOTALL)
+        valid, reason = validate_prompt(broken, ROOT, "initial", REVIEW_ID)
+        self.assertFalse(valid)
+        self.assertIn("contract boundary", reason)
+
     def test_history_may_quote_contract_tags(self) -> None:
         valid, reason = validate_prompt(
             prompt("quoted <repository_context> and <review_method>"),

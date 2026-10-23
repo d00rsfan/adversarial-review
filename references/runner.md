@@ -12,7 +12,7 @@ The main thread dispatches you via the Agent tool. The prompt contains a YAML-li
 REVIEW_ID: <string, format "{unix_ts}-{8-digit}">
 REPO_ROOT: <absolute path, validated by main>
 OPERATION: initial | resume | fresh-exec
-AGY_MODEL: <e.g. gemini-3.7-flash>  # the model agy CLI launches
+AGY_MODEL: <e.g. gemini-4-argon-high>  # the model agy CLI launches
 RUNNER_CONTRACT_PATH: <absolute path to scripts/runner_contract.py>
 PROMPT_BODY_PATH: <absolute path to file containing the review prompt body WITHOUT the session marker; main writes this before dispatch>
 ORIGINAL_PROMPT_BODY_PATH: <absolute path to immutable initial review prompt body>
@@ -56,7 +56,7 @@ If your message lacks the line entirely, main falls back to a filesystem Glob fo
 
 Rules:
 - `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
-- `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
+- `result=timeout` ⇒ the outer 1800-second deadline or a recognizable CLI internal timeout fired. Return immediately on either attempt without automatic retry, resume, or fresh-exec. `review_file` is null because timeout output may be partial.
 - `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume or a marker-bound non-`SUCCESS` recovery).
@@ -127,11 +127,11 @@ Alternatively and equivalently safe: skip the mtime bump entirely and rely on AT
 For `OPERATION=initial` and `OPERATION=fresh-exec`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 10m \
+  --output-format json --print-timeout 30m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -146,12 +146,12 @@ but read `/tmp/agy-recovery-prompt-${REVIEW_ID}.md` and pass the positively
 bound `${RECOVERY_CONVERSATION_ID}` to `--conversation`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
   --conversation ${RECOVERY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 10m \
+  --output-format json --print-timeout 30m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -163,17 +163,20 @@ exit "$agy_rc"
 This is still the one and only retry for the dispatch; it does not add a third
 agy invocation.
 
-Bash tool `timeout` parameter: `620000` (10 min + headroom).
+Bash tool `timeout` parameter, where supported: `1820000` (30 min + headroom).
+If the tool yields a live session instead, keep waiting on that same process;
+do not relaunch it. Each review attempt has a 30-minute limit. A timeout is
+terminal and never spends the non-timeout retry budget.
 
 For `OPERATION=resume`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 600 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation ${AGY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 10m \
+  --output-format json --print-timeout 30m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -198,6 +201,46 @@ Do these in order. Stop and return as soon as one fails.
 process exit. Save `status`, `error`, `response`, and `conversation_id` when
 present. A parse failure is handled by R4.3 if the process otherwise succeeded;
 for a non-zero exit it simply means the launch diagnostic has no JSON fields.
+
+**Check R4.0a: Terminal timeout gate (before recovery or verdict handling).**
+Read stderr when present and inspect the parsed JSON `error` string and `status`.
+A timeout is recognized when ANY of these holds:
+
+- the outer process exit code is `124`;
+- the parsed JSON status is `TIMEOUT` or `TIMED_OUT` (case-insensitive);
+- the parsed JSON `error` string or stderr matches any of these
+  case-insensitive diagnostic patterns:
+  - `\[agy\]\s+print timeout after\b`;
+  - `Print mode:\s+print timeout after\b`;
+  - `Print mode:\s+timed out waiting for cascade to start running\b`.
+
+These patterns cover agy's explicit internal deadline diagnostics, including
+`[agy] print timeout after ... with turn in progress; returning partial output`.
+agy may exit `0` with `status=SUCCESS` and a partial response after its internal
+print deadline. Check this gate before accepting SUCCESS or any VERDICT.
+Do not search the review `response` for timeout words; a finding may legitimately
+discuss application timeouts.
+
+On either the first attempt or the one permitted non-timeout recovery attempt,
+a recognized timeout immediately writes the complete nine-field result below
+and returns `RUNNER_RESULT_AT:`. Do NOT enter R5, archive or delete diagnostics,
+retry, resume, or launch a fresh conversation. Main must also stop; no automatic
+fresh-exec fallback is allowed after a timeout. A later review requires a new
+explicit user request.
+
+```json
+{
+  "result": "timeout",
+  "verdict": null,
+  "review_file": null,
+  "agy_conversation_id": null,
+  "attempt_id": "<the current ATTEMPT_ID string>",
+  "errors": "<outer deadline of 1800s, or the actual CLI timeout diagnostic; state that no automatic retry occurred; at most 500 characters>",
+  "archived_stdout": null,
+  "archived_stderr": null,
+  "user_warning": null
+}
+```
 
 Classify the attempt as a **recoverable interrupted stream** only when ALL of
 these conditions hold:
@@ -242,7 +285,7 @@ to validate the current turn. Do not broaden the error pattern to other tools,
 permission failures, command failures, or arbitrary `invalid_args` errors.
 
 **Check R4.1: Exit code.**
-- `124` → route to retry (Step R5). Same retry budget as any other failure — ONE retry per dispatch total. If retry also returns 124, write `{"result":"timeout",...}` and return. (Retrying on timeout keeps the 2-attempts-per-round invariant consistent across failure types; main treats timeout as terminal just like launch_failure.)
+- `124` → already handled by the terminal timeout gate R4.0a; never route to R5. That gate also handles internal CLI timeouts regardless of exit code.
 - `≠ 0 and ≠ 124` on the first attempt + R4.0 classified a recoverable interrupted stream → route to the interrupted-stream branch of Step R5.
 - `≠ 0 and ≠ 124` during interrupted-stream recovery + the diagnostic JSON has a non-empty `response` → continue to R4.2/R4.3; the marker-bound stale-status guard below will decide whether it is usable.
 - Any other `≠ 0 and ≠ 124` → read `/tmp/agy-stderr-${REVIEW_ID}.txt`, route to retry (Step R5). Preserve parsed JSON `status` and `error` in the failure diagnostic even when stderr is empty.
@@ -398,9 +441,9 @@ never write a descriptive placeholder.
 
 (The two `success` JSON shapes are inlined above per branch. Every success path through R4.4 MUST emit a complete 9-field JSON object — never rely on implicit defaults, never leave a field omitted, never write a literal placeholder like `"<uuid>"` in the output.)
 
-### Step R5: Retry once on any failure (TERMINAL — main will not re-dispatch)
+### Step R5: Retry once on a non-timeout failure (TERMINAL — main will not re-dispatch)
 
-You have at most ONE retry per dispatch. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
+You have at most ONE retry per dispatch for non-timeout failures only. A timeout on either attempt returns immediately under R4.0a and never enters this step. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
 
 On retry, first generate a NEW `ATTEMPT_ID` (the old one stays in the old
 rollout; we must not let the grep match it again). Then choose exactly one
@@ -433,15 +476,16 @@ Launch it synchronously with the Step R3 recovery command using
 `${RECOVERY_CONVERSATION_ID}`. Set `INTERRUPTED_STREAM_RECOVERY=true`, extract
 the review, and run R4.0–R4.4 with the recovery-specific guards above.
 
-**B. Every other retryable failure, including a read-only missing-file
+**B. Every other retryable non-timeout failure, including a read-only missing-file
 candidate that failed its completed-turn guard.** Rewrite the operation's original prompt
 file with the new marker and re-launch with the same Step R3 command as before.
 
 Whichever branch is chosen, this is the second and final attempt. Any check's
-"route to retry" outcome now becomes terminal — do NOT re-enter R5. Apply the
-terminal-result rule below (timeout if exit 124 again, else launch_failure).
+"route to retry" outcome now becomes terminal — do NOT re-enter R5. A timeout
+still returns immediately under R4.0a without archival or further launch.
+Apply the terminal launch-failure rule below only to non-timeout failures.
 
-If the second attempt also fails any check:
+If the second attempt also fails a non-timeout check:
 - For `OPERATION=resume`: before writing the `launch_failure` result, **archive the diagnostic files** (main will need them for the fallback fresh-exec which reuses the same base paths):
 
 ```bash
@@ -453,10 +497,12 @@ Then write the result with `archived_stdout` and `archived_stderr` set to the `-
 
 - For `OPERATION=initial` or `OPERATION=fresh-exec`: no archival needed (there is no next attempt within this REVIEW_ID to collide). Leave files at their normal paths for main's diagnostic read (main is allowed to `mv`/`rm` by path; it just doesn't read content).
 
-Write the appropriate terminal result and return the `RUNNER_RESULT_AT: ...` line:
-- Second attempt exit was 124 → write `{"result":"timeout","errors":"agy exceeded 600s on both attempts", ...}` (9 fields, all others null as applicable).
-- Any other failure mode → write `launch_failure` with the failed-check diagnostic, parsed JSON `status` / `error` when available, plus the stderr tail when non-empty (combined ≤500 chars) in `errors`. Do not replace a semantic diagnostic such as conversation-id mismatch or missing verdict with an empty stderr tail.
-In both cases, fill all 9 fields (set `archived_stdout`/`archived_stderr` only when the archival mv in the OPERATION=resume branch ran, else null; set `user_warning` null; set `verdict` null; set `review_file` to `/tmp/agy-review-${REVIEW_ID}.md` only if that file contains a valid VERDICT line, else null).
+Write the terminal `launch_failure` result and return the `RUNNER_RESULT_AT: ...` line.
+Include the failed-check diagnostic, parsed JSON `status` / `error` when available,
+plus the stderr tail when non-empty (combined ≤500 chars) in `errors`. Do not
+replace a semantic diagnostic such as conversation-id mismatch or missing verdict
+with an empty stderr tail. Timeout results are returned only by R4.0a.
+Fill all 9 fields (set `archived_stdout`/`archived_stderr` only when the archival mv in the OPERATION=resume branch ran, else null; set `user_warning` null; set `verdict` null; set `review_file` to `/tmp/agy-review-${REVIEW_ID}.md` only if that file contains a valid VERDICT line, else null).
 
 ### Step R6: Cleanup
 
@@ -471,5 +517,5 @@ The one exception is the `mv` in Step R5 above — this is NOT cleanup (files ar
 
 - You run as a subagent. Your context is disposed when you return. Anything you read (stderr files, rollout paths, JSONL streams) does NOT reach the main thread — that is the whole point.
 - Do NOT ask the main thread clarifying questions. If input is missing or malformed, write an `input_error` result to `${RESULT_PATH}` and return the `RUNNER_RESULT_AT:` line.
-- Do NOT attempt to apply fixes, interpret severity, or re-run more than one retry. The 5-round orchestration loop lives in main.
+- Do NOT attempt to apply fixes, interpret severity, retry a timeout, or re-run more than one non-timeout retry. The 5-round orchestration loop lives in main.
 - The final line of your message is ONLY `RUNNER_RESULT_AT: <path>` — nothing before, nothing after, no markdown fence. Main's regex tolerates minor wrapping, but adhering to the spec eliminates edge cases entirely.

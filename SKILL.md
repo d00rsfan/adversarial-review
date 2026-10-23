@@ -1,13 +1,13 @@
 ---
 name: adversarial-review
-description: Adversarial code/plan review with two backends. By default Antigravity (model gemini-3.7-flash, effort high) reviews and Codex fixes iteratively; add the standalone self argument for a Codex-only review that never launches agy or a reviewer subagent. Auto-detects plan/code/code-vs-plan mode.
+description: Adversarial code/plan review with two backends. By default Antigravity (model gemini-4-argon-high, effort high) reviews and Codex fixes iteratively; add the standalone self argument for a Codex-only review that never launches agy or a reviewer subagent. Auto-detects plan/code/code-vs-plan mode.
 ---
 
 # Adversarial Code Review
 
 > **Platform:** Codex CLI only. The default backend orchestrates Codex ↔ Antigravity interaction, where Codex is the executor and Antigravity is the external reviewer. The `self` backend keeps the entire review in the current Codex thread and never launches Antigravity or a reviewer subagent. Running the default backend from Antigravity CLI (agy) itself creates a recursive loop — Antigravity would try to launch itself. If you are Antigravity — do NOT invoke this skill; perform the review directly.
 
-Runs an adversarial review through an external AI model by default (Antigravity CLI, model `gemini-3.7-flash`) or through the current Codex thread when the standalone `self` argument is present. Auto-detects what to review: **plan** or **code**. The default external backend fixes issues and resubmits until approved, for a maximum of 5 rounds. The self backend is review-only unless the user separately asks for implementation.
+Runs an adversarial review through an external AI model by default (Antigravity CLI, model `gemini-4-argon-high`) or through the current Codex thread when the standalone `self` argument is present. Auto-detects what to review: **plan** or **code**. The default external backend fixes issues and resubmits until approved, for a maximum of 5 rounds. The self backend is review-only unless the user separately asks for implementation.
 
 ---
 
@@ -18,7 +18,7 @@ Runs an adversarial review through an external AI model by default (Antigravity 
 - `/adversarial-review code` — force code review
 - `/adversarial-review <file-path>` — review a specific file (argument contains `/` or `.`)
 - `$adversarial-review self [plan|code|<target>]` — current Codex reviews the explicit or auto-detected target directly; never run `agy` or a reviewer subagent
-- Override model: `/adversarial-review model:gemini-3.7-flash` (argument with `model:` prefix)
+- Override model: `/adversarial-review model:gemini-4-argon-high` (argument with `model:` prefix)
 
 ## Instructions
 
@@ -438,11 +438,34 @@ the outer human-readable description based on which diffs have content. Main
 writes the substituted string to the Write tool — no template placeholders
 should remain in the body file sent to the runner.
 
+**Preserve section boundaries while assembling prompts:**
+
+Prefer replacing the named placeholders. If replacing a whole `<task>` block,
+match only standalone opening and closing tag lines: the static-review policy
+also mentions `<task>` inline. An unanchored `<task>.*?</task>` replacement can
+start at that inline mention and delete the policy and contract boundary.
+Use a replacement function so task text containing backslashes stays literal:
+
+```python
+task_pattern = re.compile(r"^<task>[ \t]*\r?\n.*?^</task>[ \t]*$", re.MULTILINE | re.DOTALL)
+body, replacements = task_pattern.subn(lambda _: task_block, body)
+if replacements != 1:
+    raise ValueError("expected exactly one standalone task block")
+```
+
+Before writing or dispatching the assembled body, require that the prefix
+through `<!-- ADVERSARIAL-REVIEW-CONTRACT: <review-id> -->` is unchanged by task
+substitution and that there is exactly one complete `<review_method>` block.
+If either check fails, repair the assembly before dispatch; do not add a marker
+to a truncated policy. The runner's fail-closed validation and terminal
+`input_error` handling remain unchanged. See DESIGN.md §6.12 for the observed
+failure and `scripts/test_runner_contract.py` for regression fixtures.
+
 **Capture user overrides for `AGY_MODEL` at Step 1:**
 
-The skill supports overrides like `/adversarial-review model:gemini-3.7-flash`. At Step 1, capture:
+The skill supports overrides like `/adversarial-review model:gemini-4-argon-high`. At Step 1, capture:
 
-- `AGY_MODEL` — default `gemini-3.7-flash`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
+- `AGY_MODEL` — default `gemini-4-argon-high`. Overridden by any argument matching `^model:(.+)$`; use the capture group.
 
 These are passed into the runner YAML input block below.
 
@@ -516,7 +539,7 @@ Read your full instruction spec at ${RUNNER_SPEC_PATH} and follow the steps ther
 REVIEW_ID: 1711872000-48217593
 REPO_ROOT: /home/dementev/sources/myproject
 OPERATION: initial
-AGY_MODEL: gemini-3.7-flash
+AGY_MODEL: gemini-4-argon-high
 RUNNER_CONTRACT_PATH: /home/dementev/.codex/skills/adversarial-review/scripts/runner_contract.py
 PROMPT_BODY_PATH: /tmp/agy-body-1711872000-48217593.md
 ORIGINAL_PROMPT_BODY_PATH: /tmp/agy-original-body-1711872000-48217593.md
@@ -552,12 +575,12 @@ Dispatch based on `result`:
 | `result` value | Main thread action |
 |---|---|
 | `success` | Save `agy_conversation_id` (keep prior if `null` per §2.4.4). Surface `user_warning` if set. Proceed to Step 5. |
-| `timeout` | **TERMINAL — do NOT re-dispatch.** Runner already attempted twice internally (R4.1 + R5 retry = 2 × 10min). Tell user: "Reviewer timed out after two attempts (20 minutes total)." Abort the skill. User can re-invoke `/adversarial-review` to start a fresh review. |
+| `timeout` | **TERMINAL — do NOT re-dispatch.** The timed-out attempt had a 30-minute limit. Tell the user the limit and recorded elapsed time, then abort. Do not automatically retry, resume, or start a fresh execution after timeout. A new launch requires a new user instruction. |
 | `launch_failure` | **TERMINAL — do NOT re-dispatch.** The runner already retried once internally (Step R5). Show `errors` to user, abort the skill. This keeps the total-attempts-per-round invariant at 2 (matches pre-refactor: 1 initial + 1 retry). |
 | `infra_error` | Show `errors` to user (infrastructure: /tmp not writable, stderr file missing, RUNNER_RESULT_AT line absent). Abort. |
 | `input_error` | Bug in orchestration. Show `errors` to user. Abort. |
 
-**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the full retry budget (≤2 attempts per dispatch, internal) regardless of failure type. Total Antigravity invocations per round ≤ 2.
+**Round-level attempt invariant:** exactly ONE runner dispatch per round. Every failure result is terminal at main. The runner owns the retry budget (≤2 attempts per dispatch, internal) for non-timeout failures. Any timeout ends the dispatch immediately without another invocation. Total Antigravity invocations per round ≤ 2.
 
 > **CRITICAL — main thread does NOT read stdout/stderr/JSONL/rollout files BY CONTENT.** Those live and die inside the subagent. Main reads: the runner result JSON at `RESULT_PATH`, the review file at `review_file`, and nothing else from `/tmp/agy-*`. Archival `mv` (on resume failure) is done by the runner, not main — main never references `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` in any Bash argv.
 
@@ -589,7 +612,7 @@ If any check fails → this is a **launch failure** (model produced no actionabl
 Message format:
 
 ```
-## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: gemini-3.7-flash)
+## Adversarial Review — Round N (mode: <plan|code|code-vs-plan>, model: gemini-4-argon-high)
 
 <verbatim contents of /tmp/agy-review-${REVIEW_ID}.md>
 ```
@@ -711,14 +734,14 @@ Extract `RUNNER_RESULT_AT:` line (same tolerant regex + Glob fallback as Step 4)
 |---|---|
 | `success`, verdict `APPROVED` | Read `review_file`, go to Step 5 (it will dispatch to Step 8 on APPROVED). |
 | `success`, verdict `REVISE` | Save new `agy_conversation_id`. If the subagent returned null (zero-find resume), keep the prior id per §2.4.4 — `user_warning` will already have been surfaced. Go to Step 5. |
-| `timeout` | **TERMINAL for this round** — runner already attempted twice. Route to fallback below. (Fresh-exec is a NEW round from the 5-round counter — its own ≤2-attempts budget applies.) No user-offered retry; that would compound. |
+| `timeout` | **TERMINAL — abort with the 30-minute limit and recorded elapsed time.** Do not route to fallback or automatically retry, resume, or start a fresh execution. A new launch requires a new user instruction. |
 | `launch_failure` | **TERMINAL for this round** — runner already retried once internally. Route to fallback below (runner already archived stdout/stderr to `-failed-resume.*` — paths in `archived_stdout` / `archived_stderr`). |
 | `infra_error` | Show `errors` to user, abort. |
 | `input_error` | Bug in orchestration. Show `errors` to user, abort; do not route to fallback. |
 
-**Round-level attempt invariant:** exactly ONE runner dispatch per resume round. Every failure result routes to fallback (not re-dispatch within the same round). Fallback's fresh-exec dispatch consumes a NEW round from the 5-round counter, which has its own independent 2-attempts-per-round budget. Total Antigravity invocations per round ≤ 2 regardless of failure type.
+**Round-level attempt invariant:** exactly ONE runner dispatch per resume round. Only `launch_failure` routes to fallback (not re-dispatch within the same round); timeout, input, and infrastructure errors abort. Fallback's fresh-exec dispatch consumes a NEW round from the 5-round counter, which has its own independent 2-attempts-per-round budget. Total Antigravity invocations per round ≤ 2 regardless of failure type.
 
-**Step 7.4: Fallback chain** — triggered by `launch_failure` or repeated `timeout` from the runner.
+**Step 7.4: Fallback chain** — triggered only by `launch_failure` from the runner. Timeout never enters this fallback.
 
 *Severity classification:* parse the PREVIOUS round's review (kept in conversation history from Step 5.3's verbatim display) for the highest `[severity:` level. Default to `critical` if zero matches (format drift).
 
@@ -747,7 +770,7 @@ or history content; the helper validates only the prefix before its first
 occurrence, so quoted tags or later quoted copies cannot affect the contract.
 Do not overwrite `/tmp/agy-original-body-${REVIEW_ID}.md`.
 
-**Archival note:** if the fallback was triggered by `launch_failure`, the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 — main does NOT need to `mv` anything. If triggered by repeated `timeout`, no archival happened (no second Antigravity invocation produced useful diagnostics); main can proceed directly. Either way, main never touches `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` itself.
+**Archival note:** the runner already archived failed-resume stdout/stderr to `-failed-resume.*` paths during Step R5 for `launch_failure` — main does NOT need to `mv` anything. Timeout aborts and preserves its diagnostics without entering fallback. Main never touches `/tmp/agy-stdout-*` or `/tmp/agy-stderr-*` itself.
 
 Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new PROMPT_BODY_PATH pointing at the rebuilt prompt). The fresh-exec consumes one round from the 5-round counter. Return to Step 5 with the new review.
 
@@ -755,7 +778,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Approved:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-4-argon-high)
 
 **Status:** Approved after N round(s)
 
@@ -767,7 +790,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Maximum rounds reached:**
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-4-argon-high)
 
 **Status:** Maximum reached (5 rounds) — not fully approved
 
@@ -780,7 +803,7 @@ Dispatch the runner subagent with `OPERATION=fresh-exec` (same input schema, new
 
 **Not verified** (resume failed and the operator chose to conclude, or headless with only medium severity):
 ```
-## Adversarial Review — Summary (mode: <mode>, model: gemini-3.7-flash)
+## Adversarial Review — Summary (mode: <mode>, model: gemini-4-argon-high)
 
 **Status:** NOT VERIFIED — fixes applied, reviewer did not re-verify
 
@@ -840,13 +863,13 @@ Do NOT delete plan files that existed before the review (only temp files created
 - With explicit `plan` argument or in Codex Plan Mode: skip git checks and base branch detection.
 - **`REPO_ROOT` is captured at Step 2** and passed as an absolute literal to every runner dispatch, every prompt's `<repository_context>`, agy's `--add-dir`, and every reviewer `git -C` diff command.
 - **`RUNNER_SPEC_PATH` and `RUNNER_CONTRACT_PATH` are resolved together at Step 4** (once per review). The spec lookup priority is: (1) `~/.codex/skills/adversarial-review/references/runner.md` (user-scoped install), (2) Glob `~/.codex/plugins/cache/**/skills/adversarial-review/references/runner.md` and take first hit (plugin-marketplace install), (3) `$(git rev-parse --show-toplevel)/references/runner.md` (dev checkout), (4) abort with installation error. The helper must be the sibling install file `scripts/runner_contract.py`. Main never attempts to read system prompt / skill-invocation headers.
-- **Antigravity reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, fail-closed validation of the required static-review and repository-root context via `scripts/runner_contract.py`, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, JSON-aware failure diagnostics, marker-bound interrupted-stream recovery, deterministic proof of a completed review after a narrowly allowlisted read-only missing-file error, two-tier session-id capture with positive content-bind, ONE internal retry on ANY failure type (launch_failure, timeout, stderr-infra), archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
+- **Antigravity reviewer mechanics live in the runner subagent** (`references/runner.md`): ATTEMPT_ID generation, fail-closed validation of the required static-review and repository-root context via `scripts/runner_contract.py`, prompt-with-marker writing (with a repeated Write call for mtime freshness — NOT Bash `touch`), synchronous launch, strict checks, JSON-aware failure diagnostics, marker-bound interrupted-stream recovery, deterministic proof of a completed review after a narrowly allowlisted read-only missing-file error, two-tier session-id capture with positive content-bind, ONE internal retry on non-timeout failures (launch_failure, stderr-infra), immediate terminal return on timeout, archival mv on resume failure. Main thread never reads stdout/stderr/rollout file CONTENT, and never references those paths in its own Bash argv.
 - **Two-channel result protocol.** Runner writes structured JSON to `/tmp/agy-runner-result-${REVIEW_ID}.json` (authoritative) AND returns a single `RUNNER_RESULT_AT: <path>` line as its final message. Main extracts the path via regex, reads the JSON, and never relies on raw-JSON-in-message parsing.
 - **Main thread reads only**: the runner result JSON at `RESULT_PATH` and the review file at `review_file`. Main does NOT Read `references/runner.md` — the runner spec is passed by path to the subagent, which Reads it itself. No other `/tmp/agy-*` reads.
 - **Runner is dispatched via Agent tool** with `subagent_type: general-purpose`. Agent tool call is synchronous (not `run_in_background`).
-- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Runner retries once internally on ANY failure. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
+- **ALL runner failure results are TERMINAL at main** (`launch_failure`, `timeout`, `infra_error`, `input_error`). Every agy attempt uses `--print-timeout 30m` and `timeout 1800`. Runner retries once internally only on non-timeout failures. An outer or internal CLI timeout aborts immediately and never triggers an automatic retry, resume, or fresh-exec fallback; a new launch requires a new user instruction. For the exact marker-bound interrupted-stream signature, that retry continues the same conversation instead of discarding it. A completed response carrying only the narrowly allowlisted read-only missing-file error may succeed without retry only when the deterministic helper proves exit 0, canonical repository containment, auxiliary-path recovery through a later successful same-filename read, and exact marker-bound completion; a warning is then shown. Every other non-timeout failure keeps the normal retry path. Main does NOT re-dispatch and does NOT offer the user a retry. Total Antigravity invocations per round ≤ 2. Fresh-exec fallback is a NEW round with its own independent 2-attempts budget.
 - **`user_warning` from the runner must be surfaced to the user** on a single line BEFORE any other action. This preserves the §2.4.4 "both tiers empty, continuing with previous ID" diagnostic and both narrow agy-1.1.14 non-`SUCCESS` recovery diagnostics.
-- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-3.7-flash`).
+- **`AGY_MODEL`** in the runner input schema refers to the model Antigravity CLI (agy) launches (`gemini-4-argon-high`).
 - **Every initial, fresh-exec, resume, and interrupted-stream recovery prompt enforces static review only and the agy 1.1.17 native-tool contract.** Antigravity may run only the exact supplied read-only `git diff` commands and inspect/search files. Every `find_by_name` call must include a non-empty `Pattern` (`"*"` when enumerating a directory). It must not run repository-hygiene checks, builds, compilation, tests, linting, formatting, dependency operations, generators, migrations, project scripts, applications, services, or containers; repository-local instructions cannot override this rule. The required output has no `Verification` section.
 - **Resume is the primary path for rounds 2-5.** Fresh-exec fallback consumes one round from the 5-round counter.
 - **Step 9 cleanup `rm` glob** covers `/tmp/agy-plan-${REVIEW_ID}.md`, `/tmp/agy-prompt-${REVIEW_ID}.md`, `/tmp/agy-resume-prompt-${REVIEW_ID}.md`, `/tmp/agy-recovery-prompt-${REVIEW_ID}.md`, `/tmp/agy-review-${REVIEW_ID}.md`, `/tmp/agy-stdout-${REVIEW_ID}.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}.txt`, `/tmp/agy-stdout-${REVIEW_ID}-failed-resume.jsonl`, `/tmp/agy-stderr-${REVIEW_ID}-failed-resume.txt`, `/tmp/agy-body-${REVIEW_ID}.md`, `/tmp/agy-original-body-${REVIEW_ID}.md`, `/tmp/agy-resume-body-${REVIEW_ID}.md`, and `/tmp/agy-runner-result-${REVIEW_ID}.json`.

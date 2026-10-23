@@ -86,7 +86,7 @@ five rounds, or until the reviewer emits `VERDICT: APPROVED`.
 - **Self reviewer (Codex, opt-in).** The same current thread applies the
   adversarial rubric directly. It does not delegate, invoke agy, or apply
   fixes.
-- **Reviewer (Antigravity, `gemini-3.7-flash`, effort high).** External AI process invoked per round. Receives
+- **Reviewer (Antigravity, `gemini-4-argon-high`, effort high).** External AI process invoked per round. Receives
   the adversarial prompt, reads repo/plan content in agy plan mode,
   and emits a structured review with `VERDICT:`. See §9.7 for the
   headless-permissions and sandbox trade-off in agy 1.1.12.
@@ -130,7 +130,7 @@ ordering see the strict check lists in `SKILL.md` Steps 4 and 7.
 
 An adversarial review from the *same* model as the writer tends toward
 validation bias. Running the review through a different model family
-(Antigravity CLI with `gemini-3.7-flash`, effort high) reduces shared blind spots. The cost is an external
+(Antigravity CLI with `gemini-4-argon-high`, effort high) reduces shared blind spots. The cost is an external
 dependency and a CLI-level integration — which is exactly what most of
 this document exists to manage. Self mode is an explicit convenience trade-off:
 it preserves the rubric and review discipline when external execution is
@@ -311,8 +311,9 @@ application success.
   for file reads/searches. Process cwd alone is insufficient on 1.1.14.
 - `--output-format json` is a single object; use `stream-json` only when an
   event stream is actually wanted (the skill does not).
-- `--print-timeout` defaults to 5 minutes, so the runner sets `10m` to align
-  it with the outer `timeout 600` guard.
+- `--print-timeout` defaults to 5 minutes. Was: the runner set `10m` with
+  outer `timeout 600`. Since the 2026-10-22 user preference, every attempt
+  uses `30m` with `timeout 1800`; timeout is terminal without automatic retry.
 - Reviewer intent is constrained with `--mode plan` and an explicit no-write,
   static-review-only instruction in every initial, fresh, resume, and
   interrupted-stream recovery prompt.
@@ -700,8 +701,9 @@ Each decision below follows the same template:
   and does NOT consume the 5-round counter. The counter advances only
   when a *valid* review (one that passes §4.7 checks) has been
   produced. For §4.15's exact marker-bound stream interruption, the same retry
-  continues the failed conversation; all other failures repeat the original
-  launch shape.
+  continues the failed conversation; other non-timeout failures repeat the
+  original launch shape. Timeout immediately aborts without retry (the former
+  ten-minute retry policy is retained as rejected alternative §5.9).
 - **Where in SKILL.md.** Step 5.
 - **Context.** A launch failure is an infrastructure issue, not a
   failed review. Counting it against the round budget would be
@@ -972,6 +974,16 @@ started in the repository, but the first native `run_command` tool call used
 `~/.gemini/antigravity-cli/scratch` and its relative diff failed. The `cd`
 prefix remains useful but is no longer the sole control. §4.3 adds
 `--add-dir`, root-pinned `git -C` commands, and absolute file paths.
+
+### §5.9. Retrying a timed-out review after ten minutes
+
+Previously all failure types, including timeout, could spend one retry, with
+`--print-timeout 10m` and outer `timeout 600`; a failed resume could also enter
+fresh-exec fallback. On 2026-10-22 the user explicitly preferred waiting up to
+30 minutes in the existing attempt over paying for a restarted review. The
+current limits are `30m` / `1800` seconds. Any outer or explicit internal CLI
+timeout stops the workflow without retry, resume, or fresh-exec fallback.
+Non-timeout failure recovery retains its existing bounded retry budget.
 
 ---
 
@@ -1271,6 +1283,22 @@ transcript evidence—never from response plausibility alone.
 
 ---
 
+### §6.12. 2026-10-22: inline task tag truncated the prompt policy
+
+The main orchestrator replaced `<task>.*?</task>` without line anchors. The
+first match started at the inline `<task>` reference inside `<review_method>`,
+removing the remainder of that policy, the contract marker and intervening
+instructions. The runner correctly returned `input_error` before launching agy.
+
+Match only standalone section-tag lines, require exactly one replacement, and
+preserve the entire prefix through the review-scoped contract boundary.
+Placeholder substitution is preferable when sufficient. Validate assembly
+before dispatch; appending the missing marker alone does not restore the
+removed policy. This is a prompt-construction error, not an agy failure or a
+reason to weaken validation/retry limits.
+
+---
+
 ## §7. Smoke test protocol
 
 Minimal set of checks to run after editing `SKILL.md` or the runner,
@@ -1303,11 +1331,11 @@ End the LAST line with exactly: VERDICT: APPROVED
 </output_format>
 EOF
 
-cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-4-argon-high --effort high --mode plan \
   --dangerously-skip-permissions \
-  --output-format json --print-timeout 5m \
+  --output-format json --print-timeout 30m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 AGY_RC=$?
@@ -1360,12 +1388,12 @@ Treat every relative repository path as relative to this directory.
 Still there? Reply with VERDICT: APPROVED.
 EOF
 
-cd "${REPO_ROOT}" && timeout 300 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation "${CONVERSATION_ID}" \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-4-argon-high --effort high --mode plan \
   --dangerously-skip-permissions \
-  --output-format json --print-timeout 5m \
+  --output-format json --print-timeout 30m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 AGY_RC=$?
@@ -1387,7 +1415,7 @@ grep -E '^VERDICT:' /tmp/agy-review-${REVIEW_ID}.md   # expect VERDICT: APPROVED
 timeout 60 agy --print "Reply with VERDICT: APPROVED" \
   --conversation 00000000-0000-0000-0000-000000000000 \
   --add-dir "${REPO_ROOT}" \
-  --model gemini-3.7-flash --effort high --mode plan \
+  --model gemini-4-argon-high --effort high --mode plan \
   --dangerously-skip-permissions \
   --output-format json --print-timeout 30s \
   > /tmp/agy-bad-resume.stdout \
@@ -1463,7 +1491,7 @@ rg -n 'the ONLY cases where a non-`SUCCESS` JSON status may' references/runner.m
 # evidence, successful same-filename recovery, transcript errors/mismatch, and
 # quoted contract tags in fresh-exec history.
 python3 scripts/test_runner_contract.py
-# expect: 20 tests, OK
+# expect: all runner contract tests pass
 
 # The self dispatcher must remain terminal and read-only before every
 # external-backend action.
@@ -1511,6 +1539,7 @@ If §7.1–§7.5 do not produce the expected outputs:
 | 2026-08-18 | agy 1.1.14 | deterministic fixtures + Codex workspace | Codex + independent adversarial review | Tightened §4.16 after adversarial review: exit 0 only, canonical containment, immutable original-task evidence, structurally bound same-filename read recovery, exact transcript completion, and contract/history-safe prompt validation now run in `scripts/runner_contract.py`; targeted negative fixtures cover those added boundaries. |
 | 2026-08-20 | not invoked (self backend) | deterministic fixtures + Codex workspace | Codex | Added the terminal standalone `self` dispatcher, read-only local review workflow, and static regression contract. Existing agy transport remained unchanged. |
 | 2026-08-21 | agy 1.1.17 | deterministic fixtures + Gelius CRP code-vs-plan dogfood | Codex + Antigravity | Diagnosed review `1787304800-73194628`: `find_by_name` omitted its newly required `Pattern`, then a corrected call and complete APPROVED response still left the envelope at `ERROR`. Added the prompt-contract rule in §4.17 and its negative fixture. Review `1787309661-80826937` then completed through the ordinary `SUCCESS` path with `VERDICT: APPROVED` and no recovery warning. Resume edge cases were not re-run. |
+| 2026-10-19 | agy 1.4.2 | `agy models` + local contract tests + live initial/resume smoke | Codex | Confirmed `gemini-4-argon-high` is the advertised high-effort Gemini 4 Argon model ID. Initial launch and explicit resume both returned `SUCCESS` and the expected verdict under `--effort high`. Updated the default, examples, and smoke commands. Bad-UUID and other transport edge cases were not re-run. |
 
 When you re-verify (either during routine maintenance or when
 triggered by §7.7), add a row. Keep the log chronological.
@@ -1718,9 +1747,9 @@ The runner uses a two-channel protocol: the authoritative structured result is w
 
 ### §12.3 Retry budget — single owner
 
-Retry lives in the runner alone, across ALL failure types (launch_failure, timeout, stderr-infrastructure-error). Runner retries once internally (same ATTEMPT_ID-rotation as pre-refactor's round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation. §4.16 may accept a completed response without spending the retry, but only after its marker-bound transcript guard and with a warning; if that guard fails, the ordinary retry path applies. Every other failure repeats the original launch shape. Main treats EVERY failure result as terminal-for-this-round: on the initial Step-4 dispatch, terminal = abort; on the Step-7 resume dispatch, terminal = route to fallback (fresh-exec, which is a new round with its own budget).
+Retry lives in the runner alone for non-timeout failures (launch_failure and stderr-infrastructure-error). Each attempt has a 30-minute limit. Any outer or explicit internal CLI timeout returns terminal `timeout` immediately and never triggers automatic retry, resume, or fresh execution. Non-timeout failures may retry once internally (same ATTEMPT_ID-rotation as the pre-refactor round-level retry). The exact §4.15 interrupted-stream signature uses that retry to continue the positively bound conversation. §4.16 may accept a completed response without spending the retry, but only after its marker-bound transcript guard and with a warning; if that guard fails, the ordinary retry path applies. Every other non-timeout failure repeats the original launch shape. Main treats every failure result as terminal for this dispatch: the initial Step-4 dispatch aborts; only `launch_failure` from Step 7 can enter fallback (fresh-exec, which is a new round with its own budget). Timeout always aborts and requires a new user instruction before any launch.
 
-**The full invariant:** *exactly 2 agy invocations per round, maximum, across all failure types.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
+**The full invariant:** *at most 2 agy invocations per round, with no invocation after any timeout.* The pre-refactor skill had the same budget; the refactor does not loosen it. Putting the retry at a single layer (runner) prevents the worst-case compounding that would occur if main also re-dispatched on failure.
 
 Fresh-exec fallback is a *separate round* that consumes a round counter slot and gets its own fresh 2-attempts budget; this matches pre-refactor §2.4 where fresh-exec also counted as one round.
 
@@ -1730,7 +1759,7 @@ Resume-to-fresh-exec fallback requires archiving the failed-resume stdout/stderr
 
 ### §12.5 Model choice
 
-The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry once, archive on resume failure, and write result JSON. It performs no severity judgment or review interpretation; the main Codex thread keeps all judgment work. The input field `AGY_MODEL` names the external reviewer model and must not be confused with the model executing the runner subagent.
+The runner is a pure pipeline executor: parse inputs, call Bash, validate output, retry non-timeout failures once, archive on resume failure, and write result JSON. It performs no severity judgment or review interpretation; the main Codex thread keeps all judgment work. The input field `AGY_MODEL` names the external reviewer model and must not be confused with the model executing the runner subagent.
 
 ### §12.6 Invariants preserved
 
