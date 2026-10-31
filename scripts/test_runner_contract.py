@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from runner_contract import RECOVERED_READ_WARNING, validate_prompt, validate_recovered_read
+from runner_contract import RECOVERED_READ_WARNING, rate_limit_reason, validate_prompt, validate_recovered_read
 
 
 ROOT = "/work/repo"
@@ -38,6 +38,32 @@ Absolute repository root: {ROOT}
 <!-- ADVERSARIAL-REVIEW-CONTRACT: {REVIEW_ID} -->
 Review the supplied diff.{suffix}
 """
+
+
+class RateLimitTests(unittest.TestCase):
+    def test_first_quota_error_is_terminal_despite_retryable_flag(self) -> None:
+        stderr = json.dumps({"status": "RESOURCE_EXHAUSTED", "error_code": 429, "retryable": True})
+        stdout = json.dumps({"status": "ERROR", "error": "Individual quota reached. Resets in 146h17m43s."})
+        self.assertIsNotNone(rate_limit_reason(stdout, stderr))
+
+    def test_structured_and_plain_http_errors(self) -> None:
+        for output in ('{"status":"ERROR","error":{"code":429}}',
+                       '{"status":"ERROR","status_code":"429"}',
+                       'HTTP 429 Too Many Requests',
+                       '{"status":"RESOURCE_EXHAUSTED"}'):
+            with self.subTest(output=output):
+                self.assertIsNotNone(rate_limit_reason(output, ""))
+        self.assertIsNotNone(rate_limit_reason("", "Error: HTTP 429"))
+
+    def test_review_content_is_not_a_rate_limit(self) -> None:
+        for status in ("SUCCESS", "ERROR"):
+            output = json.dumps({"status": status, "error": "unrelated stream failure" if status == "ERROR" else None,
+                                 "response": "Handle HTTP 429 and RESOURCE_EXHAUSTED in the API. VERDICT: REVISE"})
+            self.assertIsNone(rate_limit_reason(output, ""))
+
+    def test_other_failures_remain_eligible_for_existing_retry(self) -> None:
+        for error in ("HTTP 503", "connection reset", "Agent execution terminated due to error.", "1429 records"):
+            self.assertIsNone(rate_limit_reason(json.dumps({"status": "ERROR", "error": error}), ""))
 
 
 class PromptContractTests(unittest.TestCase):

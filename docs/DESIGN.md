@@ -2002,3 +2002,24 @@ external backend still holds. Its value is predictable no-external-reviewer
 execution, lower orchestration overhead, and direct use of Codex's repository
 access. The report names itself “Self Adversarial Review” so the source of
 judgment is not confused with independent Antigravity approval.
+
+
+## §14. HTTP 429 is terminal (2026-10-30)
+
+The previous generic execution-failure rule allowed the runner to spend its
+second launch on `RESOURCE_EXHAUSTED (429)`. A Gelius #9491 review exhausted
+both attempts on the same individual-quota error. The user explicitly required
+that the first 429 stop the workflow without a second attempt.
+
+The runner now checks stdout error metadata and stderr with the deterministic
+`runner_contract.py rate-limit` guard before exit-code/recovery checks after
+every launch. HTTP 429, `RESOURCE_EXHAUSTED`, and individual quota exhaustion
+produce `rate_limited`, even if the provider marks the error retryable. Review
+response text is excluded from envelope inspection. Initial and resume result
+tables stop this result without R5, fresh-exec, model fallback or redispatch;
+diagnostic artifacts remain available. Other eligible failures retain their
+existing bounded retry. This supersedes the broad retry language in §§4.12
+and 12.3 for quota errors only.
+
+Validation uses offline error fixtures and the existing runner/self tests;
+no live agy invocation is needed to test stopping on quota exhaustion.

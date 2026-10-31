@@ -30,7 +30,7 @@ To avoid fragility of JSON-in-final-message, you return results via TWO channels
 
 ```json
 {
-  "result": "success" | "approval_denied" | "launch_failure" | "timeout" | "infra_error" | "input_error",
+  "result": "success" | "approval_denied" | "rate_limited" | "launch_failure" | "timeout" | "infra_error" | "input_error",
   "verdict": "APPROVED" | "REVISE" | null,
   "review_file": "/tmp/agy-review-<REVIEW_ID>.md" | null,
   "agy_conversation_id": "<uuid>" | null,
@@ -57,7 +57,8 @@ If your message lacks the line entirely, main falls back to a filesystem Glob fo
 Rules:
 - `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
 - `result=timeout` ⇒ reviewer timed out (exit 124). `review_file` may be null.
-- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
+- `result=launch_failure` ⇒ the eligible infrastructure retry (one internal retry) already failed; HTTP 429/quota exhaustion uses `rate_limited` instead. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
+- `result=rate_limited` ⇒ HTTP 429, `RESOURCE_EXHAUSTED`, or individual quota exhaustion. Stop immediately on whichever attempt returned it. No second launch, resume, fresh-exec, other-model fallback, or sleep-and-retry, even when the provider says `retryable: true`. Set `verdict`, `review_file`, and `agy_conversation_id` to null; preserve the diagnostic and reset estimate in `errors` and leave diagnostic files in place. Main must terminate this invocation without fallback.
 - `result=approval_denied` ⇒ the host explicitly rejected an approval request. Stop immediately, even on the first attempt; no infrastructure retry is required. Set `verdict`, `review_file`, and `agy_conversation_id` to null. Keep all nine fields and preserve the rejected action and host rationale in `errors`; do not infer that the denied command executed or reuse an older review artifact.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume or a marker-bound non-`SUCCESS` recovery).
@@ -249,6 +250,20 @@ Run each complete code block as ONE Bash tool call. The `agy_rc` capture and fin
 ### Step R4: Post-launch strict checks
 
 Do these in order. Stop and return as soon as one fails.
+
+**Check R4.rate-limit: Terminal quota guard — BEFORE R4.0, exit-code checks, recovery classification, or ANY route to R5.**
+
+Run the deterministic guard after EVERY launch (initial, resume, fresh-exec, and any recovery/retry):
+
+```bash
+python3 "${RUNNER_CONTRACT_PATH}" rate-limit \
+  --stdout-json /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  --stderr /tmp/agy-stderr-${REVIEW_ID}.txt
+```
+
+- Exit nonzero or malformed guard output: return `infra_error`; do not launch again.
+- `rate_limited: true`: return `rate_limited` immediately with the normal nine-field result, no verdict or review path, and the quota diagnostic/reset estimate in `errors`. The first 429 MUST NOT cause a second attempt. Ignore provider `retryable: true` for this decision. Do not enter R5, archive for a future fresh-exec, resume, wait, switch models, or ask main to re-dispatch.
+- `rate_limited: false`: proceed to R4.0. A review response merely discussing 429 is not quota evidence.
 
 **Check R4.0: Parse the diagnostic JSON envelope.** Opportunistically parse
 `/tmp/agy-stdout-${REVIEW_ID}.jsonl` as one JSON object before checking the
@@ -456,6 +471,8 @@ never write a descriptive placeholder.
 (The two `success` JSON shapes are inlined above per branch. Every success path through R4.4 MUST emit a complete 9-field JSON object — never rely on implicit defaults, never leave a field omitted, never write a literal placeholder like `"<uuid>"` in the output.)
 
 ### Step R5: Retry once on an eligible execution failure (TERMINAL — main will not re-dispatch)
+
+HTTP 429/quota exhaustion never enters R5: return `rate_limited` under R4.rate-limit instead. Recheck that guard before spending the retry budget.
 
 You have at most ONE retry per dispatch. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
 
