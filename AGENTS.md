@@ -36,7 +36,7 @@ runner contract validator, and static regression tests.
 
 - Don't renumber DESIGN.md sections — cross-refs across all three files break silently (§10.2).
 - Don't remove the session marker `<!-- ADVERSARIAL-REVIEW-SESSION: ${REVIEW_ID}-${ATTEMPT_ID} -->` from prompt templates — the session-id fallback depends on it (§4.1b).
-- Don't add silent-recovery fallbacks. The skill's explicit preference is fail-closed over masked failure (§6.7, §6.8).
+- Don't add silent-recovery fallbacks. The skill's explicit preference is fail-closed over masked failure (§4.1, §4.8).
 - Keep the standalone `self` dispatcher before the placeholder note and Step 1.
   It must stop before any runner, subagent, agy, or `/tmp/agy-*` action.
 

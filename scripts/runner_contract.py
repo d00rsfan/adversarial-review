@@ -75,6 +75,23 @@ def validate_prompt(
     return True, "prompt contract satisfied"
 
 
+def rate_limit_reason(stdout: str, stderr: str) -> str | None:
+    """Inspect error metadata, never the review response, before retry decisions."""
+    try:
+        envelope = json.loads(stdout)
+    except (ValueError, TypeError):
+        envelope = None
+    if isinstance(envelope, dict):
+        diagnostic = {key: value for key, value in envelope.items()
+                      if key in {"error", "errors", "error_code", "status_code", "http_status", "code", "status"}}
+        evidence = json.dumps(diagnostic, ensure_ascii=False) + "\n" + stderr
+    else:
+        evidence = stdout + "\n" + stderr
+    if re.search(r"(?<!\d)429(?!\d)|RESOURCE_EXHAUSTED|individual quota reached", evidence, re.IGNORECASE):
+        return "HTTP 429 / quota exhausted: stop immediately; no retry, resume, fresh-exec or model fallback"
+    return None
+
+
 def _valid_uuid(value: Any) -> bool:
     if not isinstance(value, str) or not UUID_RE.fullmatch(value):
         return False
@@ -280,6 +297,10 @@ def _parser() -> argparse.ArgumentParser:
     prompt.add_argument("--operation", choices=("initial", "resume", "fresh-exec"), required=True)
     prompt.add_argument("--review-id", required=True)
 
+    rate_limit = subparsers.add_parser("rate-limit")
+    rate_limit.add_argument("--stdout-json", required=True)
+    rate_limit.add_argument("--stderr", required=True)
+
     recovered = subparsers.add_parser("recovered-read")
     recovered.add_argument("--stdout-json", required=True)
     recovered.add_argument("--transcript", required=True)
@@ -296,6 +317,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.command == "rate-limit":
+        try:
+            reason = rate_limit_reason(_read_text(args.stdout_json), _read_text(args.stderr))
+        except OSError as exc:
+            print(json.dumps({"rate_limited": None, "reason": f"diagnostics unreadable: {exc}"}))
+            return 1
+        print(json.dumps({"rate_limited": reason is not None, "reason": reason}))
+        return 0
     if args.command == "prompt":
         try:
             body = _read_text(args.prompt_body)

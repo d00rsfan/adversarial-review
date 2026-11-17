@@ -30,7 +30,7 @@ To avoid fragility of JSON-in-final-message, you return results via TWO channels
 
 ```json
 {
-  "result": "success" | "launch_failure" | "timeout" | "infra_error" | "input_error",
+  "result": "success" | "rate_limited" | "launch_failure" | "timeout" | "infra_error" | "input_error",
   "verdict": "APPROVED" | "REVISE" | null,
   "review_file": "/tmp/agy-review-<REVIEW_ID>.md" | null,
   "agy_conversation_id": "<uuid>" | null,
@@ -56,8 +56,9 @@ If your message lacks the line entirely, main falls back to a filesystem Glob fo
 
 Rules:
 - `result=success` ⇒ `verdict` and `review_file` must be set. `agy_conversation_id` must be set iff `verdict=REVISE` (or null per §2.4.4 on resume zero-find — see Step R4.4).
-- `result=timeout` ⇒ the outer 1800-second deadline or a recognizable CLI internal timeout fired. Return immediately on either attempt without automatic retry, resume, or fresh-exec. `review_file` is null because timeout output may be partial.
-- `result=launch_failure` ⇒ infrastructure retry (one internal retry) already failed. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
+- `result=timeout` ⇒ the outer 2400-second deadline or a recognizable CLI internal timeout fired. Return immediately on either attempt without automatic retry, resume, or fresh-exec. `review_file` is null because timeout output may be partial.
+- `result=launch_failure` ⇒ the eligible infrastructure retry (one internal retry) already failed; HTTP 429/quota exhaustion uses `rate_limited` instead. Main treats this as TERMINAL — it will NOT re-dispatch you. `errors` MUST name the failed check, include parsed JSON `status` / `error` when available, and include the tail of stderr when stderr is non-empty.
+- `result=rate_limited` ⇒ HTTP 429, `RESOURCE_EXHAUSTED`, or individual quota exhaustion. Stop immediately on whichever attempt returned it. No second launch, resume, fresh-exec, other-model fallback, or sleep-and-retry, even when the provider says `retryable: true`. Set `verdict`, `review_file`, and `agy_conversation_id` to null; preserve the diagnostic and reset estimate in `errors` and leave diagnostic files in place. Main must terminate this invocation without fallback.
 - `result=infra_error` ⇒ something outside agy (e.g. `/tmp` not writable).
 - `user_warning` is non-null when main should surface a one-line warning to the user (e.g. §2.4.4 zero-find on resume or a marker-bound non-`SUCCESS` recovery).
 - Do NOT return the review text in the JSON. Main reads `review_file` directly.
@@ -127,11 +128,11 @@ Alternatively and equivalently safe: skip the mtime bump entirely and rely on AT
 For `OPERATION=initial` and `OPERATION=fresh-exec`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 2400 agy --print "$(cat /tmp/agy-prompt-${REVIEW_ID}.md)" \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 30m \
+  --output-format json --print-timeout 40m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -146,12 +147,12 @@ but read `/tmp/agy-recovery-prompt-${REVIEW_ID}.md` and pass the positively
 bound `${RECOVERY_CONVERSATION_ID}` to `--conversation`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 2400 agy --print "$(cat /tmp/agy-recovery-prompt-${REVIEW_ID}.md)" \
   --conversation ${RECOVERY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 30m \
+  --output-format json --print-timeout 40m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -163,20 +164,20 @@ exit "$agy_rc"
 This is still the one and only retry for the dispatch; it does not add a third
 agy invocation.
 
-Bash tool `timeout` parameter, where supported: `1820000` (30 min + headroom).
+Bash tool `timeout` parameter, where supported: `2420000` (40 min + headroom).
 If the tool yields a live session instead, keep waiting on that same process;
-do not relaunch it. Each review attempt has a 30-minute limit. A timeout is
+do not relaunch it. Each review attempt has a 40-minute limit. A timeout is
 terminal and never spends the non-timeout retry budget.
 
 For `OPERATION=resume`:
 
 ```bash
-cd "${REPO_ROOT}" && timeout 1800 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
+cd "${REPO_ROOT}" && timeout 2400 agy --print "$(cat /tmp/agy-resume-prompt-${REVIEW_ID}.md)" \
   --conversation ${AGY_CONVERSATION_ID} \
   --add-dir "${REPO_ROOT}" \
   --model ${AGY_MODEL} --effort high \
   --mode plan --dangerously-skip-permissions \
-  --output-format json --print-timeout 30m \
+  --output-format json --print-timeout 40m \
   > /tmp/agy-stdout-${REVIEW_ID}.jsonl \
   2>/tmp/agy-stderr-${REVIEW_ID}.txt
 agy_rc=$?
@@ -195,6 +196,20 @@ Run each complete code block as ONE Bash tool call. The `agy_rc` capture and fin
 ### Step R4: Post-launch strict checks
 
 Do these in order. Stop and return as soon as one fails.
+
+**Check R4.rate-limit: Terminal quota guard — BEFORE R4.0, exit-code checks, recovery classification, or ANY route to R5.**
+
+Run the deterministic guard after EVERY launch (initial, resume, fresh-exec, and any recovery/retry):
+
+```bash
+python3 "${RUNNER_CONTRACT_PATH}" rate-limit \
+  --stdout-json /tmp/agy-stdout-${REVIEW_ID}.jsonl \
+  --stderr /tmp/agy-stderr-${REVIEW_ID}.txt
+```
+
+- Exit nonzero or malformed guard output: return `infra_error`; do not launch again.
+- `rate_limited: true`: return `rate_limited` immediately with the normal nine-field result, no verdict or review path, and the quota diagnostic/reset estimate in `errors`. The first 429 MUST NOT cause a second attempt. Ignore provider `retryable: true` for this decision. Do not enter R5, archive for a future fresh-exec, resume, wait, switch models, or ask main to re-dispatch.
+- `rate_limited: false`: proceed to R4.0. A review response merely discussing 429 is not quota evidence.
 
 **Check R4.0: Parse the diagnostic JSON envelope.** Opportunistically parse
 `/tmp/agy-stdout-${REVIEW_ID}.jsonl` as one JSON object before checking the
@@ -235,7 +250,7 @@ explicit user request.
   "review_file": null,
   "agy_conversation_id": null,
   "attempt_id": "<the current ATTEMPT_ID string>",
-  "errors": "<outer deadline of 1800s, or the actual CLI timeout diagnostic; state that no automatic retry occurred; at most 500 characters>",
+  "errors": "<outer deadline of 2400s, or the actual CLI timeout diagnostic; state that no automatic retry occurred; at most 500 characters>",
   "archived_stdout": null,
   "archived_stderr": null,
   "user_warning": null
@@ -442,6 +457,8 @@ never write a descriptive placeholder.
 (The two `success` JSON shapes are inlined above per branch. Every success path through R4.4 MUST emit a complete 9-field JSON object — never rely on implicit defaults, never leave a field omitted, never write a literal placeholder like `"<uuid>"` in the output.)
 
 ### Step R5: Retry once on a non-timeout failure (TERMINAL — main will not re-dispatch)
+
+HTTP 429/quota exhaustion never enters R5: return `rate_limited` under R4.rate-limit instead. Recheck that guard before spending the retry budget.
 
 You have at most ONE retry per dispatch for non-timeout failures only. A timeout on either attempt returns immediately under R4.0a and never enters this step. This retry is the ONLY retry in the system — main treats your `launch_failure` result as terminal and will NOT re-dispatch you. Track the retry counter in your reasoning.
 

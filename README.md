@@ -135,7 +135,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 "Bash(git symbolic-ref*)",
 "Bash(git rev-parse*)",
 // Antigravity: initial/fresh/resume/recovery launch (prompt is one --print argument)
-"Bash(cd * && timeout 1800 agy --print *)",
+"Bash(cd * && timeout 2400 agy --print *)",
 // Prompt-file reads performed by the quoted command substitutions
 "Bash(cat /tmp/agy-prompt-*)",
 "Bash(cat /tmp/agy-resume-prompt-*)",
@@ -186,7 +186,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
       "Bash(git status*)",
       "Bash(git symbolic-ref*)",
       "Bash(git rev-parse*)",
-      "Bash(cd * && timeout 1800 agy --print *)",
+      "Bash(cd * && timeout 2400 agy --print *)",
       "Bash(cat /tmp/agy-prompt-*)",
       "Bash(cat /tmp/agy-resume-prompt-*)",
       "Bash(cat /tmp/agy-recovery-prompt-*)",
@@ -221,7 +221,7 @@ Permissions should go into `~/.codex/settings.json` (global) or project settings
 </details>
 
 **Security note:** The `agy` rule allows any `agy` invocation wrapped in
-`timeout 1800`. The skill passes `--mode plan`, and every initial, fresh, and
+`timeout 2400`. The skill passes `--mode plan`, and every initial, fresh, and
 resume prompt explicitly prohibits file changes and project verification.
 Antigravity may use only the supplied read-only `git diff` commands plus file
 read/search operations; it must not run builds, compilation, tests, lint,
@@ -291,8 +291,8 @@ Add the permissions from the [setup section](#3-add-permissions). Check that
 the file is valid JSON and in the right location (`~/.codex/settings.json`).
 
 **Antigravity hangs / timeout (exit code 124).**
-All reviewer calls use `--print-timeout 30m` and are also wrapped in
-`timeout 1800`, giving each attempt 30 minutes. An outer timeout (exit 124)
+All reviewer calls use `--print-timeout 40m` and are also wrapped in
+`timeout 2400`, giving each attempt 40 minutes. An outer timeout (exit 124)
 or an explicit internal CLI timeout stops the review immediately, preserving
 diagnostics. Neither the runner nor the orchestrator retries, resumes, or
 starts a fresh review automatically after timeout. Start another review only
